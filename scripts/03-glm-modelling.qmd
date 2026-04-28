@@ -1,0 +1,87 @@
+---
+title: "Model-GLM"
+format: pdf
+---
+
+## Environment Setup & Data Loading
+
+```{r setup-and-load}
+#| message: false
+#| warning: false
+
+library(lme4)        
+library(performance) 
+library(see)        
+
+# Load the pre-processed, scaled data from the previous script
+model_data <- readRDS("data/model_data.rds")
+```
+
+
+## Mixed-Effects Modeling
+
+```{r}
+# FIT THE GLMER MODEL
+
+# Predicting loan denial (1/0) using a binomial logistic mixed effects regression model.
+
+cat("Fitting model... \n")
+start_time <- Sys.time()
+
+final_glmer_model <- glmer(
+  denied ~ race_factor + sex_factor + age_factor + dti_4bins + 
+           log_income_z + ltv_z + minority_pct_z + msa_income_pct_z +
+           (1 | county_code) + (1 | lei),
+  data = model_data,
+  family = binomial(link = "logit"),
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000))
+)
+
+end_time <- Sys.time()
+cat("Model fitting complete. Run time:\n")
+print(end_time - start_time)
+```
+
+
+## Initial Model Diagnostics
+
+```{r}
+# COLLINEARITY CHECK (VIF)
+
+# Ensure none of our scaled predictors are highly correlated with each other.
+
+cat("\n--- Multicollinearity Check ---\n")
+collin_check <- check_collinearity(final_glmer_model)
+
+# Table results
+print(collin_check)
+
+# Visual of VIF scores
+plot(collin_check)
+```
+
+## Summary of Results
+
+```{r}
+# Print Final Model Summary
+cat("Model Summary \n")
+summary(final_glmer_model)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

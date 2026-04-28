@@ -1,0 +1,79 @@
+---
+title: "Data Modeling Preparation"
+format: pdf
+---
+
+## Environment Setup
+
+```{r setup}
+#| include: false
+#| warning: false
+#| message: false
+
+library(arrow)       
+library(dplyr)      
+library(lme4)        
+```
+
+## Load Data
+
+```{r}
+loans_NY <- read_parquet("data/loans_NY_clean.parquet")
+
+# SELECT MODELING FEATURES
+# Isolate only the variables required for the model
+
+colnames(loans_NY)
+
+loans_model_data <- loans_NY |>
+  select(
+    denied, race, applicant_poc, sex, age_bracket, 
+    log_income, dti_bracket, combined_loan_to_value_ratio_num, 
+    log_loan_amount, tract_minority_population_percent, 
+    tract_to_msa_income_percentage, lender_id, county_code, census_tract)
+```
+
+
+## Preprocessing
+
+```{r}
+# SET FACTOR BASELINES & STANDARDIZE CONTINUOUS VARIABLES
+
+# Scaling continuous predictors for appropriate convergence and comparison
+
+model_data <- loans_model_data |>
+  mutate(
+    # Remove ordered status and explicitly set reference/baseline levels
+    age = factor(age_bracket, ordered = FALSE),
+    #age = relevel(age_bracket, ref = "<25"),
+    
+    dti = factor(dti_bracket, ordered = FALSE),
+    #dti = relevel(dti_bracket, ref = "<36%"),
+    
+    # Standardize all continuous predictors
+    log_income_z = scale(log_income)[, 1],
+    log_loan_amount_z = scale(log_loan_amount)[, 1],
+    ltv_z = scale(combined_loan_to_value_ratio_num)[, 1],
+    minority_pct_z = scale(tract_minority_population_percent)[, 1],
+    msa_income_pct_z = scale(tract_to_msa_income_percentage)[, 1]
+  )
+
+# EXPORT MODEL-READY DATA
+saveRDS(model_data, "data/model_data.rds")
+```
+
+
+## Correlation Analysis
+
+```{r}
+# Correlation Matrix
+continuous_vars <- model_data |>
+  select(log_income_z, log_loan_amount_z, ltv_z, minority_pct_z, msa_income_pct_z)
+  
+cor_matrix <- cor(continuous_vars, use = "complete.obs")
+
+round(cor_matrix, 2)
+```
+
+Prior to model fitting, we assessed the continuous predictors for multicollinearity. A high Pearson correlation (r = 0.77) was observed between the log-transformed income and loan amount variables. Because including highly correlated predictors will weaken coefficient interpretation, loan amount was dropped as a covariate predicor for a better model.
+

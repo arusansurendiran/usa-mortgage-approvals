@@ -1,0 +1,186 @@
+---
+title: "Data Preparation and Cleaning"
+format: pdf
+---
+
+## Loading Data & State Filtering
+
+*Note: This step is run once to reduce the primary 11M+ row dataset down to a workable, state-specific file.*
+
+```{r extract-ny-data}
+#| eval: false
+
+# Load the raw national dataset and filter exclusively for New York records.
+# Saved to a compressed parquet file to optimize storage.
+
+loans <- read_parquet("2023_public_loans.parquet")
+
+loan_records_NY <- loans |>
+  filter(state_code == "NY")
+
+write_parquet(loan_records_NY, "loan_records_NY.parquet")
+```
+
+## Environment Setup
+
+```{r setup}
+#| include: false
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(here)
+library(skimr)
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(ggrepel)
+library(patchwork)
+library(scales)
+library(gtsummary)
+library(arrow)
+```
+
+
+
+## Data Cleaning & Feature Engineering
+
+```{r data-clean}
+
+# LOAD STATE DATA
+loans <- read_parquet("data/loan_records_NY.parquet")
+
+# Define target columns
+
+cols_of_interest <- c(
+  "lei", "census_tract", "county_code", "state_code", 
+  "action_taken", 
+  "income", "debt_to_income_ratio", "combined_loan_to_value_ratio", 
+  
+  "loan_amount", "loan_type", "loan_purpose", 
+  "property_value", "occupancy_type", "loan_term", 
+  
+  "derived_race", "derived_sex", "applicant_age", 
+  "tract_minority_population_percent", "ffiec_msa_md_median_family_income",
+  "tract_to_msa_income_percentage"
+)
+
+# FILTERING
+# Isolate standard, first-lien, conventional mortgages for primary residences.
+# Exclude incomplete demographic data, reverse mortgages, and commercial loans.
+
+loans_NY <- loans |>
+  filter(action_taken %in% c(1, 2, 3),
+         derived_loan_product_type == "Conventional:First Lien",
+         loan_purpose == 1, 
+         occupancy_type == 1,
+         !derived_race %in% c("Race Not Available", "Free Form Text Only"),
+         derived_sex != "Sex Not Available",
+         reverse_mortgage == 2, 
+         business_or_commercial_purpose == 2,
+         total_units %in% c(1,2),
+         loan_amount < 1e7) |>
+  select(all_of(cols_of_interest)) |> 
+  drop_na()
+
+# FEATURE ENGINEERING & TYPE CONVERSION
+
+loans_NY_clean1 <- loans_NY |>
+  mutate(
+    # Binary outcome: 1 = Denied, 0 = Approved
+    denied = ifelse(action_taken == 3, 1, 0),
+    
+    # Create high-level DTI risk bins based on widely accepted DTI ratio ranges
+    dti_4bins = case_when(
+      debt_to_income_ratio %in% c("<20%", "20%-<30%", "30%-<36%") ~ "<36%",
+      debt_to_income_ratio %in% as.character(36:49) ~ "36%-49%",
+      debt_to_income_ratio == "50%-60%" ~ "50%-60%",
+      debt_to_income_ratio == ">60%" ~ ">60%",
+      TRUE ~ NA_character_
+    ),
+
+    # Extract numeric values from string ratios/values
+    combined_loan_to_value_ratio_num = readr::parse_number(combined_loan_to_value_ratio),
+    property_value_num = readr::parse_number(property_value),
+    
+    # Standardize race categories
+    race_factor = case_when(
+      derived_race == "White" ~ "White",
+      derived_race == "Black or African American" ~ "Black",
+      derived_race == "Asian" ~ "Asian",
+      derived_race == "Joint" ~ "Joint",
+      derived_race %in% c("American Indian or Alaska Native", 
+                          "2 or more minority races", 
+                          "Native Hawaiian or Other Pacific Islander") ~ "Other/Multiracial",
+      TRUE ~ NA_character_
+    ),
+    
+    # Standardize age (8888 indicates missing/unknown)
+    age_factor = ifelse(applicant_age == "8888", NA, applicant_age)
+  )
+
+# OUTLIER HANDLING & INSTITUTION FILTERING
+
+# Calculate 1st and 99th percentiles to trim extreme CLTV and Income outliers
+cltv_bounds <- quantile(loans_NY_clean1$combined_loan_to_value_ratio_num, probs = c(0.01, 0.99), na.rm = TRUE)
+p_low <- 0 
+p_high <- quantile(loans_NY_clean1$income, 0.99, na.rm = TRUE)
+ 
+# Restrict analysis to institutions (LEI) with a meaningful sample size (>= 50 applications)
+loans_NY_clean2 <- loans_NY_clean1 |>
+  group_by(lei) |>
+  filter(n() >= 50) |> 
+  ungroup() 
+
+# EXPORT
+
+# Apply outlier thresholds, handle transformations, and enforce factor levels
+loans_NY_clean3 <- loans_NY_clean2 |>
+  filter(
+    !is.na(race_factor), 
+    !is.na(age_factor),
+    combined_loan_to_value_ratio_num >= cltv_bounds[1], 
+    combined_loan_to_value_ratio_num <= cltv_bounds[2],
+    income > p_low, 
+    income <= p_high
+  ) |>
+  mutate(
+    # Log transformations for heavily skewed financial variables
+    log_income = log(income),
+    log_loan_amount = log(loan_amount),
+    
+    # Factor levels
+    race_factor = factor(race_factor, levels = c("White", "Black", "Asian", "Joint", "Other/Multiracial")),
+    age_factor = factor(applicant_age, levels = c("<25", "25-34", "35-44", "45-54", "55-64", "65-74", ">74"), ordered = TRUE),
+    sex_factor = factor(derived_sex, levels = c("Male", "Female", "Joint")),
+    status_factor = factor(ifelse(denied == 1, "Denied", "Approved"), levels = c("Approved", "Denied")),
+    
+    # Ordered factor levels for bins
+    dti_4bins = factor(dti_4bins, levels = c("<36%", "36%-49%", "50%-60%", ">60%"), ordered = TRUE),
+    
+    # POC Flag
+    applicant_poc = ifelse(race_factor == "White", "White", "POC/Non-White")
+  )
+
+# Save the final analytical dataset
+write_parquet(loans_NY_clean3, "data/loans_NY_clean.parquet")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
