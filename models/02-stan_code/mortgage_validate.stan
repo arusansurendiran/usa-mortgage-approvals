@@ -1,8 +1,7 @@
 // -------------------------------------------------------------------------
-// File: mortgage_validate.stan
-// Description: Full Bayesian hierarchical logistic regression model.
-//              Includes generated quantities for Leave-One-Out Cross 
-//              Validation (LOO-CV) and Posterior Predictive Checks (PPC).
+// File: mortgage_model.stan
+// Description: Bayesian hierarchical logistic regression model. Includes 
+// generated quantity 'y_rep' for Posterior Predictive Checks (PPC).
 // -------------------------------------------------------------------------
 
 data {
@@ -60,16 +59,14 @@ model {
 }
 
 generated quantities {
-  vector[N] log_lik;
   array[N] int y_rep; 
 
   {
     // Calculate the linear predictor once per draw
     vector[N] logit_p = alpha + X * beta + a_county[county_id] + a_bank[bank_id];
     
-    // Generate both the LOO-CV metric and the PPC draw
+    // Generate the PPC draw
     for (n in 1:N) {
-      log_lik[n] = bernoulli_logit_lpmf(y[n] | logit_p[n]);
       y_rep[n]   = bernoulli_logit_rng(logit_p[n]);
     }
   }

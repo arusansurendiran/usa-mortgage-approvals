@@ -1,6 +1,7 @@
 // -------------------------------------------------------------------------
 // File: mortgage_model.stan
-// Description: Bayesian hierarchical logistic regression model.
+// Description: Bayesian hierarchical logistic regression model. Includes 
+// generated quantity y_rep for Posterior Predictive Checks (PPC).
 // -------------------------------------------------------------------------
 
 data {
