@@ -10,27 +10,25 @@ format: pdf
 #| warning: false
 #| message: false
 
+library(tidyverse)      
 library(arrow)       
-library(dplyr)      
-library(lme4)        
 ```
 
 ## Load Data
 
 ```{r}
-loans_NY <- read_parquet("data/loans_NY_clean.parquet")
+loans_NY <- read_parquet(here("data", "02-analysis_data", "loans_NY_clean.parquet"))
 
 # SELECT MODELING FEATURES
 # Isolate only the variables required for the model
 
-colnames(loans_NY)
-
 loans_model_data <- loans_NY |>
   select(
     denied, race, applicant_poc, sex, age_bracket, 
-    log_income, dti_bracket, combined_loan_to_value_ratio_num, 
+    log_income, dti_bracket, combined_loan_to_value_ratio, 
     log_loan_amount, tract_minority_population_percent, 
     tract_to_msa_income_percentage, lender_id, county_code, census_tract)
+
 ```
 
 
@@ -43,23 +41,20 @@ loans_model_data <- loans_NY |>
 
 model_data <- loans_model_data |>
   mutate(
-    # Remove ordered status and explicitly set reference/baseline levels
+    # Remove ordered status for R models
     age = factor(age_bracket, ordered = FALSE),
-    #age = relevel(age_bracket, ref = "<25"),
-    
     dti = factor(dti_bracket, ordered = FALSE),
-    #dti = relevel(dti_bracket, ref = "<36%"),
-    
+
     # Standardize all continuous predictors
     log_income_z = scale(log_income)[, 1],
     log_loan_amount_z = scale(log_loan_amount)[, 1],
-    ltv_z = scale(combined_loan_to_value_ratio_num)[, 1],
+    ltv_z = scale(combined_loan_to_value_ratio)[, 1],
     minority_pct_z = scale(tract_minority_population_percent)[, 1],
     msa_income_pct_z = scale(tract_to_msa_income_percentage)[, 1]
   )
 
 # EXPORT MODEL-READY DATA
-saveRDS(model_data, "data/model_data.rds")
+saveRDS(model_data, here("data", "02-analysis_data", "model_data.rds"))
 ```
 
 

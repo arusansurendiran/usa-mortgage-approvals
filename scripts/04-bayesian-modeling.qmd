@@ -1,5 +1,136 @@
 ---
-title: "Model-Bayes"
-format: html
+title: "Bayesian Modeling (Stan)"
+format: pdf
 ---
+
+# Environment Setup & Data Loading
+
+```{r setup-and-load}
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(rstan)
+
+# Optimize Stan execution globally
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+
+# Load pre-processed data
+model_data <- readRDS(here("data", "02-analysis_data", "model_data.rds"))
+```
+
+
+```{r done-notif}
+library(beepr)
+done <- function(msg = "Code finished!") {
+  beep(10)
+  # Note: terminal-notifier must be installed on your system for this to work
+  system(paste0("terminal-notifier -message '", msg, "' -title 'RStudio Notification'"))
+}
+```
+
+## Stan Data Preparation
+
+```{r stan-data}
+set.seed(2053)
+
+# Create the fixed-effects model matrix (excluding the intercept)
+X_matrix <- model.matrix(
+  ~ race + sex + age + dti + log_income_z + ltv_z + 
+    minority_pct_z + msa_income_pct_z, 
+  data = model_data
+)[, -1]
+
+# Vectors for random intercepts (county and bank)
+county_int <- as.integer(as.factor(model_data$county_code))
+bank_int <- as.integer(as.factor(model_data$lender_id))
+
+# Compile the final data list for Stan
+stan_data <- list(
+  N = nrow(model_data),
+  K = ncol(X_matrix),
+  J = length(unique(county_int)),
+  L = length(unique(bank_int)),
+  X = X_matrix,
+  county_id = county_int,
+  bank_id = bank_int,
+  y = model_data$denied
+)
+```
+
+## Bayesian Inference Model
+
+```{r}
+# BAYESIAN FIT
+cat("Starting Stan sampling...\n")
+start_time <- Sys.time()
+
+final_bayes_model <- stan(
+  file = here("models/02-stan_code/mortgage_model.stan"),
+  data = stan_data,
+  iter = 2000,
+  warmup = 1000,
+  chains = 4,
+  seed = 2053
+)
+
+cat("Sampling complete. Saving model...\n")
+saveRDS(final_bayes_model, file = here("models", "01-hierarchical-models", "final_bayes_model.rds"))
+
+end_time <- Sys.time()
+print(end_time - start_time)
+done()
+```
+
+
+## Bayesian Validation Fit
+
+```{r}
+# BAYESIAN FIT WITH GENERATED QUANTITIES: Y_REP
+cat("Starting Stan sampling...\n")
+start_time <- Sys.time()
+
+final_stan_fit <- stan(
+  file = here("models/02-stan_code/mortgage_validate.stan"),
+  data = stan_data,
+  iter = 2000,
+  warmup = 1000,
+  chains = 4,
+  seed = 2053
+)
+
+cat("Sampling complete. Saving model...\n")
+saveRDS(final_stan_fit, file = here("models", "01-hierarchical-models", "final_stan_fit.rds"))
+
+end_time <- Sys.time()
+print(end_time - start_time)
+done()
+```
+
+
+## Saving y_rep Simulations in Compressed RDS 
+
+```{r}
+final_stan_fit <- readRDS(here("models", "01-hierarchical-models", "final_stan_fit.rds"))
+
+# Extract y_rep separately (larger data file)
+y_rep <- rstan::extract(final_stan_fit, pars = "y_rep")$y_rep
+saveRDS(y_rep, file = here("models", "01-hierarchical-models", "y_rep_simulations.rds"))
+
+rm(final_stan_fit, y_rep)
+gc()
+done()
+```
+
+
+
+
+
+
+
+
+
+
+
 

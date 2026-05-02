@@ -11,16 +11,23 @@ format: pdf
 
 library(lme4)        
 library(performance) 
-library(see)        
 
 # Load the pre-processed, scaled data from the previous script
-model_data <- readRDS("data/model_data.rds")
+model_data <- readRDS(here("data", "02-analysis_data", "model_data.rds"))
 ```
 
+```{r done-notif}
+library(beepr)
+done <- function(msg = "Code finished!") {
+  beep(10)
+  # Note: terminal-notifier must be installed on your system for this to work
+  system(paste0("terminal-notifier -message '", msg, "' -title 'RStudio Notification'"))
+}
+```
 
 ## Mixed-Effects Modeling
 
-```{r}
+```{r glm-model}
 # FIT THE GLMER MODEL
 
 # Predicting loan denial (1/0) using a binomial logistic mixed effects regression model.
@@ -29,9 +36,9 @@ cat("Fitting model... \n")
 start_time <- Sys.time()
 
 final_glmer_model <- glmer(
-  denied ~ race_factor + sex_factor + age_factor + dti_4bins + 
+  denied ~ race + sex + age + dti + 
            log_income_z + ltv_z + minority_pct_z + msa_income_pct_z +
-           (1 | county_code) + (1 | lei),
+           (1 | county_code) + (1 | lender_id),
   data = model_data,
   family = binomial(link = "logit"),
   control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000))
@@ -40,42 +47,47 @@ final_glmer_model <- glmer(
 end_time <- Sys.time()
 cat("Model fitting complete. Run time:\n")
 print(end_time - start_time)
-```
 
+saveRDS(final_glmer_model, here("models", "01-hierarchical-models", "final_glmer_model.rds"))
 
-## Initial Model Diagnostics
-
-```{r}
-# COLLINEARITY CHECK (VIF)
-
-# Ensure none of our scaled predictors are highly correlated with each other.
-
-cat("\n--- Multicollinearity Check ---\n")
-collin_check <- check_collinearity(final_glmer_model)
-
-# Table results
-print(collin_check)
-
-# Visual of VIF scores
-plot(collin_check)
+done()
 ```
 
 ## Summary of Results
 
-```{r}
+```{r glm-summary}
+final_glmer_model <- readRDS(here("models", "01-hierarchical-models", "final_glmer_model.rds"))
 # Print Final Model Summary
 cat("Model Summary \n")
 summary(final_glmer_model)
 ```
 
+## Initial Model Diagnostics
 
+```{r collin-check}
+# COLLINEARITY CHECK (VIF)
 
+cat("\n--- Multicollinearity Check ---\n")
+collin_check <- check_collinearity(final_glmer_model)
 
+# Ensure none of our scaled predictors are highly correlated with each other.
 
+# Visual of VIF scores
+plot(collin_check) +
+  scale_x_discrete(labels = c(
+    "race" = "Race",
+    "sex"= "Sex",
+    "age" = "Age",
+    "dti" = "Debt-to-Income",
+    "log_income_z" = "Log Income",
+    "ltv_z" = "Loan-to-Value",
+    "minority_pct_z" = "Minority %",
+    "msa_income_pct_z" = "MSA Income %")) +
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+    legend.position = "bottom")
 
-
-
-
+```
 
 
 

@@ -3,6 +3,8 @@ title: "Data Preparation and Cleaning"
 format: pdf
 ---
 
+# Data Preparation
+
 ## Loading Data & State Filtering
 
 *Note: This step is run once to reduce the primary 11M+ row dataset down to a workable, state-specific file.*
@@ -15,10 +17,10 @@ format: pdf
 
 loans <- read_parquet("2023_public_loans.parquet")
 
-loan_records_NY <- loans |>
+loans_NY <- loans |>
   filter(state_code == "NY")
 
-write_parquet(loan_records_NY, "loan_records_NY.parquet")
+write_parquet(loans_NY, "loans_NY.parquet")
 ```
 
 ## Environment Setup
@@ -30,157 +32,300 @@ write_parquet(loan_records_NY, "loan_records_NY.parquet")
 
 library(tidyverse)
 library(here)
-library(skimr)
-library(dplyr)
-library(ggplot2)
-library(knitr)
-library(kableExtra)
-library(ggrepel)
-library(patchwork)
-library(scales)
-library(gtsummary)
 library(arrow)
+library(stringr)
+library(kableExtra)
 ```
-
-
 
 ## Data Cleaning & Feature Engineering
 
 ```{r data-clean}
-
 # LOAD STATE DATA
-loans <- read_parquet("data/loan_records_NY.parquet")
+loans <- read_parquet(here("data", "01-raw_data", "loans_NY.parquet"))
+#loans <- read_csv(here("data", "01-raw_data", "loans_NY.csv"))
 
 # Define target columns
-
 cols_of_interest <- c(
   "lei", "census_tract", "county_code", "state_code", 
   "action_taken", 
-  "income", "debt_to_income_ratio", "combined_loan_to_value_ratio", 
   
-  "loan_amount", "loan_type", "loan_purpose", 
-  "property_value", "occupancy_type", "loan_term", 
+  "income", "debt_to_income_ratio", "combined_loan_to_value_ratio", 
+  "loan_amount", 
   
   "derived_race", "derived_sex", "applicant_age", 
-  "tract_minority_population_percent", "ffiec_msa_md_median_family_income",
-  "tract_to_msa_income_percentage"
-)
+  
+  "tract_minority_population_percent","tract_to_msa_income_percentage")
 
-# FILTERING
-# Isolate standard, first-lien, conventional mortgages for primary residences.
-# Exclude incomplete demographic data, reverse mortgages, and commercial loans.
+# FILTERING & FEATURE ENGINEERING
+# Isolate standard mortgages, rename LEI, and build initial features
 
-loans_NY <- loans |>
-  filter(action_taken %in% c(1, 2, 3),
-         derived_loan_product_type == "Conventional:First Lien",
-         loan_purpose == 1, 
-         occupancy_type == 1,
-         !derived_race %in% c("Race Not Available", "Free Form Text Only"),
-         derived_sex != "Sex Not Available",
-         reverse_mortgage == 2, 
-         business_or_commercial_purpose == 2,
-         total_units %in% c(1,2),
-         loan_amount < 1e7) |>
-  select(all_of(cols_of_interest)) |> 
+loans_step1 <- loans |>
+  filter(
+    action_taken %in% c(1, 2, 3),
+    derived_loan_product_type == "Conventional:First Lien",
+    loan_purpose == 1, 
+    occupancy_type == 1,
+    reverse_mortgage == 2, 
+    business_or_commercial_purpose == 2,
+    total_units %in% c(1,2)) |>
+  select(all_of(cols_of_interest)) |>
+  mutate(
+    combined_loan_to_value_ratio = readr::parse_number(combined_loan_to_value_ratio))
+
+# Drop Missing/Withheld Demographics
+loans_step2 <- loans_step1 |>
+  filter(
+    !derived_race %in% c("Race Not Available", "Free Form Text Only"),
+    derived_sex != "Sex Not Available")
+
+# Drop Other NAs
+loans_step3 <- loans_step2 |>
+  filter(applicant_age != "8888") |>
   drop_na()
 
-# FEATURE ENGINEERING & TYPE CONVERSION
+# Outlier Removal by calculating bounds based on data
+cltv_99th <- quantile(loans_step3$combined_loan_to_value_ratio, 0.99, na.rm = TRUE)
+income_99th <- quantile(loans_step3$income, 0.99, na.rm = TRUE)
+loan_high <- 1e7
 
-loans_NY_clean1 <- loans_NY |>
+loans_step4 <- loans_step3 |>
+  filter(
+    combined_loan_to_value_ratio > 0, 
+    combined_loan_to_value_ratio <= cltv_99th,
+    income > 0, 
+    income <= income_99th,
+    loan_amount < loan_high)
+
+# Filter Small Lenders
+loans_step5 <- loans_step4 |>
+  rename(lender_id = lei) |>
+  group_by(lender_id) |>
+  filter(n() >= 50) |> 
+  ungroup()
+
+# VARIABLE TRANSFORMATIONS AND LEVELS
+loans_final <- loans_step5 |>
   mutate(
-    # Binary outcome: 1 = Denied, 0 = Approved
     denied = ifelse(action_taken == 3, 1, 0),
+    log_income = log(income),
+    log_loan_amount = log(loan_amount),
     
-    # Create high-level DTI risk bins based on widely accepted DTI ratio ranges
-    dti_4bins = case_when(
+    dti_bracket = case_when(
       debt_to_income_ratio %in% c("<20%", "20%-<30%", "30%-<36%") ~ "<36%",
       debt_to_income_ratio %in% as.character(36:49) ~ "36%-49%",
       debt_to_income_ratio == "50%-60%" ~ "50%-60%",
       debt_to_income_ratio == ">60%" ~ ">60%",
       TRUE ~ NA_character_
     ),
-
-    # Extract numeric values from string ratios/values
-    combined_loan_to_value_ratio_num = readr::parse_number(combined_loan_to_value_ratio),
-    property_value_num = readr::parse_number(property_value),
     
-    # Standardize race categories
-    race_factor = case_when(
+    race = case_when(
       derived_race == "White" ~ "White",
       derived_race == "Black or African American" ~ "Black",
       derived_race == "Asian" ~ "Asian",
       derived_race == "Joint" ~ "Joint",
       derived_race %in% c("American Indian or Alaska Native", 
                           "2 or more minority races", 
-                          "Native Hawaiian or Other Pacific Islander") ~ "Other/Multiracial",
-      TRUE ~ NA_character_
+                          "Native Hawaiian or Other Pacific Islander") ~ "Other/Multiracial"
     ),
     
-    # Standardize age (8888 indicates missing/unknown)
-    age_factor = ifelse(applicant_age == "8888", NA, applicant_age)
+    race = factor(race, levels = c("White", "Black", "Asian", "Joint", "Other/Multiracial")),
+    age_bracket = factor(applicant_age, levels = c("<25", "25-34", "35-44", "45-54", "55-64", "65-74", ">74"), ordered = TRUE),
+    sex = factor(derived_sex, levels = c("Male", "Female", "Joint")),
+    status = factor(ifelse(denied == 1, "Denied", "Approved"), levels = c("Approved", "Denied")),
+    dti_bracket = factor(dti_bracket, levels = c("<36%", "36%-49%", "50%-60%", ">60%"), ordered = TRUE),
+    applicant_poc = ifelse(race == "White", "White", "POC/Non-White")
   )
-
-# OUTLIER HANDLING & INSTITUTION FILTERING
-
-# Calculate 1st and 99th percentiles to trim extreme CLTV and Income outliers
-cltv_bounds <- quantile(loans_NY_clean1$combined_loan_to_value_ratio_num, probs = c(0.01, 0.99), na.rm = TRUE)
-p_low <- 0 
-p_high <- quantile(loans_NY_clean1$income, 0.99, na.rm = TRUE)
- 
-# Restrict analysis to institutions (LEI) with a meaningful sample size (>= 50 applications)
-loans_NY_clean2 <- loans_NY_clean1 |>
-  group_by(lei) |>
-  filter(n() >= 50) |> 
-  ungroup() 
 
 # EXPORT
+write_parquet(loans_final, here("data", "02-analysis_data", "loans_NY_clean.parquet"))
+```
 
-# Apply outlier thresholds, handle transformations, and enforce factor levels
-loans_NY_clean3 <- loans_NY_clean2 |>
-  filter(
-    !is.na(race_factor), 
-    !is.na(age_factor),
-    combined_loan_to_value_ratio_num >= cltv_bounds[1], 
-    combined_loan_to_value_ratio_num <= cltv_bounds[2],
-    income > p_low, 
-    income <= p_high
-  ) |>
+
+# Missing Data Analysis
+
+## Missingness among Columns
+
+```{r missing-data}
+n_step1 <- nrow(loans_step1)
+
+# Calculate missingness and outliers on the base population
+missing_data <- loans_step1 |>
+  summarise(
+    `Race---Withheld (NA)` = sum(derived_race %in% c("Race Not Available", "Free Form Text Only"), na.rm = TRUE),
+    `Sex---Withheld (NA)`  = sum(derived_sex == "Sex Not Available", na.rm = TRUE),
+    `Age---Missing (NA)`      = sum(applicant_age == "8888", na.rm = TRUE),
+    
+    `Loan Amount---Outlier (High)`    = sum(loan_amount > loan_high, na.rm = TRUE),
+    `Income---Invalid Value (<= 0)`   = sum(income <= 0, na.rm = TRUE),
+    `Income---Outlier (High)`         = sum(income > income_99th, na.rm = TRUE),
+    `Combined Loan To Value Ratio---Outlier (High)`           = sum(combined_loan_to_value_ratio > cltv_99th, na.rm = TRUE),
+    
+    # Standard NAs across all columns of interest
+    across(all_of(cols_of_interest), ~sum(is.na(.)), .names = "{.col}---Missing (NA)")) |>
+  
+  pivot_longer(everything(), names_to = "Raw_Name", values_to = "Count") |>
+  filter(Count > 0) |> 
+  separate(Raw_Name, into = c("Variable", "Reason"), sep = "---") |>
   mutate(
-    # Log transformations for heavily skewed financial variables
-    log_income = log(income),
-    log_loan_amount = log(loan_amount),
-    
-    # Factor levels
-    race_factor = factor(race_factor, levels = c("White", "Black", "Asian", "Joint", "Other/Multiracial")),
-    age_factor = factor(applicant_age, levels = c("<25", "25-34", "35-44", "45-54", "55-64", "65-74", ">74"), ordered = TRUE),
-    sex_factor = factor(derived_sex, levels = c("Male", "Female", "Joint")),
-    status_factor = factor(ifelse(denied == 1, "Denied", "Approved"), levels = c("Approved", "Denied")),
-    
-    # Ordered factor levels for bins
-    dti_4bins = factor(dti_4bins, levels = c("<36%", "36%-49%", "50%-60%", ">60%"), ordered = TRUE),
-    
-    # POC Flag
-    applicant_poc = ifelse(race_factor == "White", "White", "POC/Non-White")
-  )
+    Percent_of_Total = round((Count / n_step1) * 100, 2),
+    Variable = str_to_title(str_replace_all(Variable, "_", " "))) |>
+  arrange(desc(Percent_of_Total)) |>
+  select(Variable, Reason, Count, Percent_of_Total)
 
-# Save the final analytical dataset
-write_parquet(loans_NY_clean3, "data/loans_NY_clean.parquet")
+kable(missing_data, 
+      col.names = c("Variable", "Issue", "Count", "% of Total"),
+      caption = "Missing Data on Sample n = 93,100") |>
+  kable_styling(latex_options = "striped")
+```
+
+
+## Summary of Data Removed 
+
+```{r removed-data}
+n_step1 <- nrow(loans_step1)
+n_step2 <- nrow(loans_step2)
+n_step3 <- nrow(loans_step3)
+n_step4 <- nrow(loans_step4)
+n_step5 <- nrow(loans_step5)
+
+data_removed <- tibble(
+  Filter_Applied = c(
+    "Missing Race & Sex",
+    "NAs in Other Columns",
+    "Extreme Outliers",
+    "Small Lenders (n < 50)"),
+  Observations_Removed = c(
+    n_step1 - n_step2,
+    n_step2 - n_step3,
+    n_step3 - n_step4,
+    n_step4 - n_step5),
+  Percent_of_Base = c(
+    round(((n_step1 - n_step2) / n_step1) * 100, 2),
+    round(((n_step2 - n_step3) / n_step1) * 100, 2),
+    round(((n_step3 - n_step4) / n_step1) * 100, 2),
+    round(((n_step4 - n_step5) / n_step1) * 100, 2)))
+
+data_removed |>
+  kable(
+    col.names = c("Filter Applied", "Dropped", "% of Sample"),
+    caption = paste("Data Summary (Original Sample Size: n =", n_step1, ")"),
+    booktabs = TRUE) |>
+  kable_styling(latex_options = "striped")
 ```
 
 
 
+```{r race-sex-missing}
+# Total starting rows
+total_n <- nrow(loans_step1)
+
+#Calculate records dropped from missing Race
+data_after_race <- loans_step1 |>
+  filter(!derived_race %in% c("Race Not Available", "Free Form Text Only"))
+
+race_loss_count <- total_n - nrow(data_after_race)
+
+# Calculate records dropped from missing Sex (from the remaining data)
+data_after_sex <- data_after_race |>
+  filter(derived_sex != "Sex Not Available")
+
+sex_loss_count <- nrow(data_after_race) - nrow(data_after_sex)
+
+# Create the simplified table
+demographic_loss_table <- tibble(
+  Filter_Applied = c("Missing Race", "Missing Sex (Remaining)", "Total Loss"),
+  Records_Dropped = c(race_loss_count, sex_loss_count, race_loss_count + sex_loss_count),
+  Percent_of_Total = c(
+    round((race_loss_count / total_n) * 100, 2),
+    round((sex_loss_count / total_n) * 100, 2),
+    round(((race_loss_count + sex_loss_count) / total_n) * 100, 2)
+  )
+)
+
+kable(demographic_loss_table, 
+      col.names = c("Filter Applied", "Records Dropped", "% of Total"),
+      caption = "Data Loss from Demographics") |> 
+  kable_styling(latex_options = c("striped"))
+```
 
 
+## Profile of Applicants Missing Racial Demographics
+
+```{r race-missing-analysis}
+#| warning: false
+#| message: false
+
+# Build the comprehensive missingness diagnostic table
+missing_race_summary <- loans_step1 |>
+  mutate(
+    Race_Status = ifelse(
+      derived_race %in% c("Race Not Available", "Free Form Text Only"), 
+      "Missing", "Disclosed"
+    )
+  ) |>
+  group_by(Race_Status) |>
+  summarise(
+    Total_Applicants = n(),
+    Mean_Income = round(mean(income, na.rm = TRUE), 0),
+    Mean_Loan = round(mean(loan_amount, na.rm = TRUE), 0),
+    Denial_Rate = paste0(round(mean(action_taken == 3, na.rm = TRUE) * 100, 1), "%"),
+    Missing_Income_Pct = paste0(round(mean(is.na(income)) * 100, 2), "%"),
+    Missing_DTI_Pct = paste0(round(mean(is.na(debt_to_income_ratio)) * 100, 2), "%")
+  ) |>
+  mutate(
+    Percent_of_Base = paste0(round((Total_Applicants / sum(Total_Applicants)) * 100, 1), "%")
+  ) |>
+  # Reorder columns for readability
+  select(Race_Status, Total_Applicants, Percent_of_Base, Mean_Income, Mean_Loan, Denial_Rate, Missing_Income_Pct, Missing_DTI_Pct)
+
+# Render the table
+missing_race_summary |>
+  kable(
+    col.names = c("Race Status", "N", "% of Base", "Mean Income ($)", "Mean Loan ($)", 
+                  "Denial Rate", "% Missing Income", "% Missing DTI"),
+    caption = "Profile of Applicants Missing Racial Demographics",
+    format.args = list(big.mark = ","),
+    booktabs = TRUE
+  ) |>
+  kable_styling(latex_options = c("striped"))
+```
+
+Approximately 14.6% of the base population omitted racial demographic data. An analysis of this cohort reveals that the data is not Missing Completely at Random (MCAR). Rather, these applicants demonstrate a distinct financial profile, possessing significantly higher mean incomes ($225k vs. $185k) and higher average loan amounts ($519k vs. $427k) compared to applicants who disclosed their race.
 
 
+## Lender Analysis
+
+```{r}
+library(scales)
+
+# 1. Aggregate applications per lender from the pre-filter data
+lender_stats <- loans_step4 |>
+  group_by(lei) |>
+  summarise(total_apps = n()) |>
+  mutate(
+    status = ifelse(total_apps >= 50, "Kept (>= 50)", "Dropped (< 50)")
+  )
+
+# 2. Generate Summary Statistics
+lender_summary <- lender_stats |>
+  group_by(status) |>
+  summarise(
+    Total_Lenders = n(),
+    Total_Apps_Lost_or_Kept = sum(total_apps),
+    Min_Apps = min(total_apps),
+    Median_Apps = median(total_apps),
+    Mean_Apps = round(mean(total_apps), 1),
+    Max_Apps = max(total_apps)
+  ) |>
+  arrange(status)
+
+kable(lender_summary, 
+      format.args = list(big.mark = ","),
+      caption = "Summary of Lenders Kept vs. Dropped") |>
+  kable_styling(latex_options = c("striped"))
+```
 
 
-
-
-
-
-
-
-
+To ensure stable group-level estimates in the random effects model, the sample was restricted to lenders processing at least 50 applications.
 
 
