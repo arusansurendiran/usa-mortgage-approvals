@@ -1,0 +1,237 @@
+---
+title: "model-diagnostics"
+format: pdf
+warning: false
+echo: false
+---
+
+
+```{r}
+library(bayesplot)
+library(tidyverse)
+library(rstan)
+library(here)
+
+model_data <- readRDS(here("data", "02-analysis_data", "model_data.rds"))
+bayes_model <- readRDS(here("models", "01-hierarchical-models", "final_bayes_model.rds"))
+glmer_model <- readRDS(here("models", "01-hierarchical-models", "final_glmer_model.rds"))
+```
+
+
+## Posterior Predictive Checks
+
+Overall Denial Rate
+
+```{r}
+
+y_rep <- readRDS(here("models", "01-hierarchical-models", "y_rep_simulations.rds"))
+y_obs <- model_data$denied
+```
+
+
+```{r}
+# 2. Run the PPC check on the mean (overall denial rate)
+# Make sure model_data$denial_binary matches your actual column name
+ppc_overall_denial <- ppc_stat(y = y_obs, 
+         yrep = y_rep, 
+         stat = "mean") +
+  labs(
+    title = "Posterior Predictive Check: Overall Denial Rate",
+    subtitle = "Comparing observed denial mean to 4000 posterior simulations",
+    x = "Mean Denial Rate"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold"))
+
+ppc_overall_denial
+saveRDS(ppc_overall_denial, file = here("paper", "plots", "ppc_overall_denial.rds"))
+```
+
+Denial Rates across Races
+
+```{r}
+#| fig-height: 7
+#| fig-cap: "PPC Plots"
+
+# To save on computational time, we calculate the means prior to plotting them using ppc_stat
+# Calculate the Observed Means (5)
+y_obs_means <- tapply(y_obs, model_data$race, mean)
+
+# Calculate Simulated Means (Matrix: 4000 x 5)
+y_rep_means <- sapply(names(y_obs_means), function(r) rowMeans(y_rep[, model_data$race == r]))
+
+ppc_stat_grouped(
+  y = y_obs_means, 
+  yrep = y_rep_means, 
+  group = names(y_obs_means), 
+  stat = "mean",
+  facet_args = list(ncol = 2)) +
+  scale_color_manual(values = "firebrick") +
+  labs(
+    title = "Posterior Predictive Check: Denial Rate by Race",
+    subtitle = "Comparing observed group means to 4,000 posterior simulations",
+    x = "Mean Denial Rate") +
+  theme_minimal() +
+  theme(legend.position = "bottom", 
+        axis.text.x = element_text(angle = 45, hjust = 1), 
+        plot.title = element_text(face = "bold", size = 14))
+```
+
+
+## MCMC Diagnostics
+
+Trace Plots
+
+```{r}
+#| fig-width: 10
+#| fig-height: 10
+#| fig-cap: "MCMC Trace Plots for Fixed Effects"
+
+var_names <- c(
+  "alpha" = "Global Intercept",
+  "beta[1]" = "Black", "beta[2]" = "Asian", "beta[3]" = "Joint (Race)", 
+  "beta[4]" = "Other/Multiracial", "beta[5]" = "Female", "beta[6]" = "Joint (Sex)",
+  "beta[7]" = "Age: 25-34", "beta[8]" = "Age: 35-44", "beta[9]" = "Age: 45-54",
+  "beta[10]" = "Age: 55-64", "beta[11]" = "Age: 65-74", "beta[12]" = "Age: >74",
+  "beta[13]" = "DTI: 36%-49%", "beta[14]" = "DTI: 50%-60%", "beta[15]" = "DTI: >60%",
+  "beta[16]" = "Log Income", "beta[17]" = "Loan-to-Value \n Ratio",
+  "beta[18]" = "Tract Minority %", "beta[19]" = "Tract-to-MSA \n Income %",
+  "sigma_county" = "County-Level Std. Dev.",
+  "sigma_bank"   = "Lender-Level Std. Dev."
+)
+
+# Convert Stan object to an array for bayesplot
+posterior_array <- as.array(bayes_model)
+
+# Trace for Fixed Effects (Betas)
+mcmc_trace(posterior_array, pars = names(var_names)[1:20], 
+           facet_args = list(labeller = as_labeller(var_names))) +
+  labs(title = "MCMC Trace Plots: Fixed Effects") +
+  theme_minimal()
+```
+
+
+```{r}
+#| fig-width: 5
+
+# Trace for Group Level Effects (Sigmas)
+mcmc_trace(posterior_array, pars = names(var_names)[21:22],
+           facet_args = list(labeller = as_labeller(var_names))) +
+  labs(title = "MCMC Trace Plots: Group-Level Variance") +
+  theme_minimal()
+```
+
+Chain Density Plots
+
+```{r}
+#| fig-width: 10
+#| fig-height: 14
+#| fig-cap: "MCMC Density Plots"
+
+
+mcmc_dens_overlay(bayes_model, pars = names(var_names), 
+                   facet_args = list(labeller = as_labeller(var_names))) +
+  labs(title = "MCMC Density Plots")
+```
+
+
+R Hats
+```{r}
+rhats <- rhat(bayes_model)
+
+mcmc_rhat_hist(rhats) +
+  theme_minimal() +
+  labs(
+    title = "Distribution of R-hat Values",
+    x = "R-hat)",
+    y = "Frequency"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14))
+```
+
+
+Effective Size 
+
+```{r}
+n_eff <- data.frame(n_eff = summary(bayes_model)$summary[, "n_eff"])
+
+ggplot(n_eff, aes(x = n_eff)) +
+  geom_histogram(fill = "#d1e1ec", alpha = 0.9, bins = 40) +
+  geom_vline(xintercept = 100, linetype = "dashed", color = "darkgray", size = 1) +
+  labs(
+    title = "Distribution of Effective Sample Sizes (n_eff)",
+    x =  "Effective Sample Size",
+    y = "Number of Parameters"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14))
+```
+
+
+## Logistic Regression Assumptions
+
+```{r}
+# Calculate predicted probabilities (the mean of y_rep columns)
+p_hat <- colMeans(y_rep)
+
+# Combine into a clean evaluation dataframe
+eval_data <- data.frame(
+  truth = y_obs,       # Binary 0/1
+  pred_prob = p_hat    # Continuous 0.0 to 1.0
+)
+```
+
+
+ROC Curve
+
+```{r}
+#| out-width: 100%
+#| fig-align: "center"
+
+
+library(pROC)
+
+# 1. Generate the ROC object
+roc_obj <- roc(response = eval_data$truth, predictor = eval_data$pred_prob)
+
+# 2. Extract AUC to display on the plot
+auc_value <- round(auc(roc_obj), 3)
+
+# 3. Plot using ggroc
+ggroc(roc_obj, colour = "midnightblue", size = 1.2) +
+  annotate("segment", x = 1, xend = 0, y = 0, yend = 1, 
+          linetype = "dashed") +
+  labs(
+    title = "ROC Curve: Mortgage Denial Prediction",
+    subtitle = paste("Area Under the Curve (AUC) =", auc_value),
+    x = "Specificity (True Negative Rate)",
+    y = "Sensitivity (True Positive Rate)"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+Binned Residual Plots
+
+```{r}
+#| out-width: 100%
+#| fig-align: "center"
+
+library(arm)
+p_hat <- colMeans(y_rep)
+
+# Calculate the raw residuals (Observed - Predicted)
+residuals <- y_obs - p_hat
+
+# Generate the plot
+binnedplot(
+  x = p_hat, 
+  y = residuals, 
+  main = "Binned Residual Plot",
+  xlab = "Expected Probability of Denial",
+  ylab = "Average Residual")
+```
+
+
