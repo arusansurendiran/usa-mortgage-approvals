@@ -8,8 +8,9 @@ This paper investigates the financial, demographic and geographic determinants o
 
 The repo is structured as:
 
--   `data/raw_data` contains the raw data as obtained from the (HMDA platform)[https://ffiec.cfpb.gov/data-browser/data/2023?category=states&items=NY&actions_taken=1,2,3&loan_purposes=1&getDetails=1].
--   `data/analysis_data` contains the cleaned dataset that was constructed.
--   `model` contains fitted Bayesian hierarchical models. 
--   `paper` contains the files used to generate the paper, including the Quarto document and reference bibliography file, as well as the PDF of the paper. 
+-   `data/01-raw_data` contains the raw data as obtained from the [HMDA platform](https://ffiec.cfpb.gov/data-browser/data/2023?category=states&items=NY&actions_taken=1,2,3&loan_purposes=1&getDetails=1).
+-   `data/02-analysis_data` contains the cleaned dataset that was constructed.
+-   `models/01-hierarchical_models` contains fitted Bayesian hierarchical models. 
+-   `models/02-stan_code` contains the Stan code files for the model. 
 -   `scripts` contains the R scripts used to clean data and model using `rstan`.
+-   `paper` contains the files used to generate the paper, including the Quarto document and reference bibliography file, as well as the PDF of the paper. 
