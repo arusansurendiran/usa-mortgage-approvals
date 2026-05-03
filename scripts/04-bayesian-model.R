@@ -1,38 +1,36 @@
----
-title: "Bayesian Modeling (Stan)"
-format: pdf
----
+#### Preamble ####
+# Purpose: Executes hierarchical Bayesian logistic regression using Stan to 
+#          analyze mortgage denial rates, including posterior predictive 
+#          simulations (y_rep) for validation.
+# Author: Arusan Surendiran
+# Date: 29 April 2026
 
-# Environment Setup & Data Loading
 
-```{r setup-and-load}
-#| message: false
-#| warning: false
-
+#### Workspace Setup ####
 library(tidyverse)
 library(rstan)
+library(here)
+library(beepr)
+
+
+#### Helper Function ####
+# Notification function for long-running models
+done <- function(msg = "Code finished!") {
+  beep(10)
+  # Requires terminal-notifier for macOS
+  try(system(paste0("terminal-notifier -message '", msg, "' -title 'RStudio Notification'")), silent = TRUE)
+}
+
 
 # Optimize Stan execution globally
 options(mc.cores = parallel::detectCores())
 rstan_options(auto_write = TRUE)
 
-# Load pre-processed data
+# Load pre-processed, scaled data
 model_data <- readRDS(here("data", "02-analysis_data", "model_data.rds"))
-```
 
+### Stan Data Preparation
 
-```{r done-notif}
-library(beepr)
-done <- function(msg = "Code finished!") {
-  beep(10)
-  # Note: terminal-notifier must be installed on your system for this to work
-  system(paste0("terminal-notifier -message '", msg, "' -title 'RStudio Notification'"))
-}
-```
-
-## Stan Data Preparation
-
-```{r stan-data}
 set.seed(2053)
 
 # Create the fixed-effects model matrix (excluding the intercept)
@@ -57,12 +55,9 @@ stan_data <- list(
   bank_id = bank_int,
   y = model_data$denied
 )
-```
 
-## Bayesian Inference Model
+### Bayesian Inference Model
 
-```{r}
-# BAYESIAN FIT
 cat("Starting Stan sampling...\n")
 start_time <- Sys.time()
 
@@ -81,13 +76,11 @@ saveRDS(final_bayes_model, file = here("models", "01-hierarchical-models", "fina
 end_time <- Sys.time()
 print(end_time - start_time)
 done()
-```
 
 
-## Bayesian Validation Fit
 
-```{r}
-# BAYESIAN FIT WITH GENERATED QUANTITIES: Y_REP
+### Bayesian Validation Fit with Generated Quantities: Y_REP
+
 cat("Starting Stan sampling...\n")
 start_time <- Sys.time()
 
@@ -106,31 +99,15 @@ saveRDS(final_stan_fit, file = here("models", "01-hierarchical-models", "final_s
 end_time <- Sys.time()
 print(end_time - start_time)
 done()
-```
 
 
-## Saving y_rep Simulations in Compressed RDS 
+### Saving Y_REP Simulations in Compressed RDS 
 
-```{r}
-final_stan_fit <- readRDS(here("models", "01-hierarchical-models", "final_stan_fit.rds"))
-
-# Extract y_rep separately (larger data file)
+# Extract y_rep separately
 y_rep <- rstan::extract(final_stan_fit, pars = "y_rep")$y_rep
 saveRDS(y_rep, file = here("models", "01-hierarchical-models", "y_rep_simulations.rds"))
 
 rm(final_stan_fit, y_rep)
 gc()
 done()
-```
-
-
-
-
-
-
-
-
-
-
-
 

@@ -1,48 +1,22 @@
----
-title: "Data Preparation and Cleaning"
-format: pdf
----
+#### Preamble ####
+# Purpose: Cleans and prepares New York mortgage loan data for analysis, 
+#          including feature engineering and missing data reporting.
+# Author: Arusan Surendiran
+# Date: 29 April 2026
+# Data Source: https://ffiec.cfpb.gov/data-browser/data/2023?category=states&items=NY&actions_taken=1,2,3&loan_purposes=1&getDetails=1
+# Pre-requisites: 
+  # - Access to "data/01-raw_data/loans_NY.parquet"
 
-# Data Preparation
 
-## Loading Data & State Filtering
-
-*Note: This step is run once to reduce the primary 11M+ row dataset down to a workable, state-specific file.*
-
-```{r extract-ny-data}
-#| eval: false
-
-# Load the raw national dataset and filter exclusively for New York records.
-# Saved to a compressed parquet file to optimize storage.
-
-loans <- read_parquet("2023_public_loans.parquet")
-
-loans_NY <- loans |>
-  filter(state_code == "NY")
-
-write_parquet(loans_NY, "loans_NY.parquet")
-```
-
-## Environment Setup
-
-```{r setup}
-#| include: false
-#| warning: false
-#| message: false
-
+#### Workspace Setup ####
 library(tidyverse)
 library(here)
 library(arrow)
-library(stringr)
-library(kableExtra)
-```
+library(scales)
 
-## Data Cleaning & Feature Engineering
 
-```{r data-clean}
-# LOAD STATE DATA
+### LOAD DATA
 loans <- read_parquet(here("data", "01-raw_data", "loans_NY.parquet"))
-#loans <- read_csv(here("data", "01-raw_data", "loans_NY.csv"))
 
 # Define target columns
 cols_of_interest <- c(
@@ -56,9 +30,9 @@ cols_of_interest <- c(
   
   "tract_minority_population_percent","tract_to_msa_income_percentage")
 
-# FILTERING & FEATURE ENGINEERING
-# Isolate standard mortgages, rename LEI, and build initial features
+### DATA CLEANING & FEATURE ENGINEERING
 
+# Isolate for standard mortgages, rename LEI, and build initial features
 loans_step1 <- loans |>
   filter(
     action_taken %in% c(1, 2, 3),
@@ -138,17 +112,15 @@ loans_final <- loans_step5 |>
 
 # EXPORT
 write_parquet(loans_final, here("data", "02-analysis_data", "loans_NY_clean.parquet"))
-```
 
 
-# Missing Data Analysis
+### MISSING DATA ANALYSIS
 
 ## Missingness among Columns
 
-```{r missing-data}
 n_step1 <- nrow(loans_step1)
 
-# Calculate missingness and outliers on the base population
+# Calculate missing data and outliers on the base population
 missing_data <- loans_step1 |>
   summarise(
     `Race---Withheld (NA)` = sum(derived_race %in% c("Race Not Available", "Free Form Text Only"), na.rm = TRUE),
@@ -172,16 +144,9 @@ missing_data <- loans_step1 |>
   arrange(desc(Percent_of_Total)) |>
   select(Variable, Reason, Count, Percent_of_Total)
 
-kable(missing_data, 
-      col.names = c("Variable", "Issue", "Count", "% of Total"),
-      caption = "Missing Data on Sample n = 93,100") |>
-  kable_styling(latex_options = "striped")
-```
-
 
 ## Summary of Data Removed 
 
-```{r removed-data}
 n_step1 <- nrow(loans_step1)
 n_step2 <- nrow(loans_step2)
 n_step3 <- nrow(loans_step3)
@@ -205,21 +170,11 @@ data_removed <- tibble(
     round(((n_step3 - n_step4) / n_step1) * 100, 2),
     round(((n_step4 - n_step5) / n_step1) * 100, 2)))
 
-data_removed |>
-  kable(
-    col.names = c("Filter Applied", "Dropped", "% of Sample"),
-    caption = paste("Data Summary (Original Sample Size: n =", n_step1, ")"),
-    booktabs = TRUE) |>
-  kable_styling(latex_options = "striped")
-```
 
-
-
-```{r race-sex-missing}
 # Total starting rows
 total_n <- nrow(loans_step1)
 
-#Calculate records dropped from missing Race
+# Calculate records dropped from missing Race
 data_after_race <- loans_step1 |>
   filter(!derived_race %in% c("Race Not Available", "Free Form Text Only"))
 
@@ -238,67 +193,31 @@ demographic_loss_table <- tibble(
   Percent_of_Total = c(
     round((race_loss_count / total_n) * 100, 2),
     round((sex_loss_count / total_n) * 100, 2),
-    round(((race_loss_count + sex_loss_count) / total_n) * 100, 2)
-  )
-)
-
-kable(demographic_loss_table, 
-      col.names = c("Filter Applied", "Records Dropped", "% of Total"),
-      caption = "Data Loss from Demographics") |> 
-  kable_styling(latex_options = c("striped"))
-```
+    round(((race_loss_count + sex_loss_count) / total_n) * 100, 2)))
 
 
 ## Profile of Applicants Missing Racial Demographics
 
-```{r race-missing-analysis}
-#| warning: false
-#| message: false
-
-# Build the comprehensive missingness diagnostic table
+# Build missingness table
 missing_race_summary <- loans_step1 |>
   mutate(
     Race_Status = ifelse(
       derived_race %in% c("Race Not Available", "Free Form Text Only"), 
-      "Missing", "Disclosed"
-    )
-  ) |>
+      "Missing", "Disclosed")) |>
   group_by(Race_Status) |>
   summarise(
     Total_Applicants = n(),
     Mean_Income = round(mean(income, na.rm = TRUE), 0),
     Mean_Loan = round(mean(loan_amount, na.rm = TRUE), 0),
     Denial_Rate = paste0(round(mean(action_taken == 3, na.rm = TRUE) * 100, 1), "%"),
-    Missing_Income_Pct = paste0(round(mean(is.na(income)) * 100, 2), "%"),
-    Missing_DTI_Pct = paste0(round(mean(is.na(debt_to_income_ratio)) * 100, 2), "%")
-  ) |>
+    Missing_Income_Pct = paste0(round(mean(is.na(income)) * 100, 2), "%")) |>
   mutate(
-    Percent_of_Base = paste0(round((Total_Applicants / sum(Total_Applicants)) * 100, 1), "%")
-  ) |>
-  # Reorder columns for readability
-  select(Race_Status, Total_Applicants, Percent_of_Base, Mean_Income, Mean_Loan, Denial_Rate, Missing_Income_Pct, Missing_DTI_Pct)
-
-# Render the table
-missing_race_summary |>
-  kable(
-    col.names = c("Race Status", "N", "% of Base", "Mean Income ($)", "Mean Loan ($)", 
-                  "Denial Rate", "% Missing Income", "% Missing DTI"),
-    caption = "Profile of Applicants Missing Racial Demographics",
-    format.args = list(big.mark = ","),
-    booktabs = TRUE
-  ) |>
-  kable_styling(latex_options = c("striped"))
-```
-
-Approximately 14.6% of the base population omitted racial demographic data. An analysis of this cohort reveals that the data is not Missing Completely at Random (MCAR). Rather, these applicants demonstrate a distinct financial profile, possessing significantly higher mean incomes ($225k vs. $185k) and higher average loan amounts ($519k vs. $427k) compared to applicants who disclosed their race.
-
+    Percent_of_Base = paste0(round((Total_Applicants / sum(Total_Applicants)) * 100, 1), "%")) |>
+  select(Race_Status, Total_Applicants, Percent_of_Base, Mean_Income, Mean_Loan, Denial_Rate, Missing_Income_Pct)
 
 ## Lender Analysis
 
-```{r}
-library(scales)
-
-# 1. Aggregate applications per lender from the pre-filter data
+# Aggregate applications per lender
 lender_stats <- loans_step4 |>
   group_by(lei) |>
   summarise(total_apps = n()) |>
@@ -306,26 +225,12 @@ lender_stats <- loans_step4 |>
     status = ifelse(total_apps >= 50, "Kept (>= 50)", "Dropped (< 50)")
   )
 
-# 2. Generate Summary Statistics
 lender_summary <- lender_stats |>
   group_by(status) |>
   summarise(
     Total_Lenders = n(),
     Total_Apps_Lost_or_Kept = sum(total_apps),
-    Min_Apps = min(total_apps),
     Median_Apps = median(total_apps),
     Mean_Apps = round(mean(total_apps), 1),
-    Max_Apps = max(total_apps)
-  ) |>
+    Max_Apps = max(total_apps)) |>
   arrange(status)
-
-kable(lender_summary, 
-      format.args = list(big.mark = ","),
-      caption = "Summary of Lenders Kept vs. Dropped") |>
-  kable_styling(latex_options = c("striped"))
-```
-
-
-To ensure stable group-level estimates in the random effects model, the sample was restricted to lenders processing at least 50 applications.
-
-
