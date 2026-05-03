@@ -71,7 +71,7 @@ final_bayes_model <- stan(
 )
 
 cat("Sampling complete. Saving model...\n")
-saveRDS(final_bayes_model, file = here("models", "01-hierarchical-models", "final_bayes_model.rds"))
+saveRDS(final_bayes_model, file = here("models", "01-hierarchical_models", "final_bayes_model.rds"))
 
 end_time <- Sys.time()
 print(end_time - start_time)
@@ -94,7 +94,7 @@ final_stan_fit <- stan(
 )
 
 cat("Sampling complete. Saving model...\n")
-saveRDS(final_stan_fit, file = here("models", "01-hierarchical-models", "final_stan_fit.rds"))
+saveRDS(final_stan_fit, file = here("models", "01-hierarchical_models", "final_stan_fit.rds"))
 
 end_time <- Sys.time()
 print(end_time - start_time)
@@ -105,7 +105,7 @@ done()
 
 # Extract y_rep separately
 y_rep <- rstan::extract(final_stan_fit, pars = "y_rep")$y_rep
-saveRDS(y_rep, file = here("models", "01-hierarchical-models", "y_rep_simulations.rds"))
+saveRDS(y_rep, file = here("models", "01-hierarchical_models", "y_rep_simulations.rds"))
 
 rm(final_stan_fit, y_rep)
 gc()

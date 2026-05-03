@@ -44,12 +44,12 @@ end_time <- Sys.time()
 cat("Model fitting complete. Run time:\n")
 print(end_time - start_time)
 
-saveRDS(final_glmer_model, here("models", "01-hierarchical-models", "final_glmer_model.rds"))
+saveRDS(final_glmer_model, here("models", "01-hierarchical_models", "final_glmer_model.rds"))
 
 
 ## Summary of Results
 
-final_glmer_model <- readRDS(here("models", "01-hierarchical-models", "final_glmer_model.rds"))
+final_glmer_model <- readRDS(here("models", "01-hierarchical_models", "final_glmer_model.rds"))
 
 cat("Model Summary \n")
 summary(final_glmer_model)
