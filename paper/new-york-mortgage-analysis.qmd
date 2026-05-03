@@ -1,0 +1,990 @@
+---
+title: "Investigating Mortgage Approval Discrimination in New York, U.S.A. (2023)"
+author: 
+  - Arusan Surendiran
+thanks: "Code and data are available at: [https://github.com/arusansurendiran/usa-mortgage-approvals](https://github.com/arusansurendiran/usa-mortgage-approvals)."
+date: today
+date-format: long
+abstract: "This paper investigates the financial, demographic and geographic determinants of mortgage denial in New York. Using a Bayesian hierarchical logistic regression model, the results show statistically credible racial disparities between minorities and White applicants in loan outcomes, despite controlling for credit factors. Furthermore, biases were observed in the variation of denial rates across individual lenders and counties. The evidence suggests current fair lending enforcement is lacking on a statewide level and requires targeted interventions to address systematic mortgage lending discrimination."
+format: pdf
+echo: false
+warning: false
+message: false
+number-sections: true
+number-depth: 3
+toc: true
+bibliography: references.bib
+---
+
+```{r}
+#| label: setup
+#| include: false
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(here)
+library(arrow)
+library(kableExtra)
+library(scales)
+library(patchwork)
+library(gtsummary)
+library(performance)
+library(broom.mixed)
+library(tigris)
+library(sf)
+library(tidybayes)
+library(bayesplot)
+```
+
+{{< pagebreak >}}
+
+# Introduction
+
+In the modern day, where we are facing intolerably high costs of living, stagnant wages, and housing shortages, home ownership is increasingly becoming an unattainable dream [@isom2024home]. However, this dream is only made more difficult when we consider housing discrimination and racial segregation, key parts of this story that has existed for decades in the United States.
+
+In the 1970s, activists across the country exposed the unfair lending practices of banks on the bases of race and ethnicity. These policies defined neighbourhoods on maps with higher concentrations of minorities, and automatically deemed them as higher credit risks. This is when the Home Mortgage Disclosure Act (HMDA) was established, brought about intentionally to address discriminatory lending practices and financial institution regulation on public reporting. Decades later, and the U.S. government continues to recognize systemic discrimination as a persistent issue in housing markets [@martinez2021reveal].
+
+Patterns in mortgage discrimination are often analyzed from several angles, including applicant profiles or location-based characteristics. Studies on the racial and ethnic disparities have been prevalent in America for decades. There are also studies documenting the stated differences among how various banks lend to minorities [@crosignani2023stakeholders]. Furthermore, the historical policies discussed above raise the question of how an applicant's residential location influences their risk of loan denial today.
+
+Our analysis focuses on one of America's most populated states, New York. The state government has critiqued its own public policy regarding the significant disparities in home ownership rooted in discrimination [@office2023racial]. We employ Bayesian hierarchical modeling, building upon existing literature that highlight its benefits. Rather than many existing studies analyzing these factors separately, we combine two group-level structures for both counties and banks to account for their inherent variation.
+
+In the following @sec-data, the dataset containing over 70,000 mortgage application records and their characteristics are described. @sec-methods outlines the Hierarchical Bayesian Logistic Regression used to determine the estimates for the drivers of loan denial risk. @sec-results follows with a review of the model results and performance. Finally, in @sec-discussion, we provide insights on the results and limitations of this analysis.
+
+# Data {#sec-data}
+
+```{r}
+#| label: load-data
+#| include: false
+source(here("scripts", "01-data_cleaning.R"))
+
+loans <- read_parquet(here("data", "01-raw_data", "loans_NY.parquet"))
+loans_NY <- read_parquet(here("data", "02-analysis_data", "loans_NY_clean.parquet"))
+loans_NY_model_data <- readRDS(here("data", "02-analysis_data", "model_data.rds"))
+```
+
+
+## Overview
+
+The Home Mortgage Disclosure Act (HMDA) data are the most comprehensive source of publicly available information on the U.S. mortgage market. The government annually mandates financial institutions to report and publicly disclose information on loan applications. The dataset for this report included nearly 400,000 mortgage applications filed throughout 2023 in New York state, collected directly from the HMDA platform [@homeloandataset]. To keep our analysis focused, we narrowed the scope of the data to be representative of primary residence purchases. It is restricted to standard, non-commercial, first home purchases of one-to-two unit properties, excluding reverse mortgages, business loans, and government-insured programs.
+
+## Missing Data
+
+Once we applied our initial filtering, the dataset included 93,000 loan applications. To determine the quality of the data, we investigate the number of NA and Unknown valued observations, as well as specific outliers in financial variables like income, loan amount, and loan-to-value ratios. Overall, most missing observations in each columns account for less than 1-3% of the data (@tbl-columns-missing in Appendix [-@sec-appendix-data]). However, we notice that the race column had the most noticeable absence of missing observations, with a total of 14.6%, second being the sex column of 5.5% (@tbl-missing-race-sex).
+
+We determined that both race and sex had a huge overlap in missing observations, where it tended to be when sex was missing, race was missing too. Overall, incomplete cases from both columns accounted for 14.95% of the initial sample (@tbl-missing-data). Since it was a demographic variable and we are interested in how mortgage approvals are seen across the true race variables, we opt to drop it in its entirety, choosing not to impute it as it would be significantly biased to impute this based on financial variables. We cannot measure a disparity against an unknown group for our inferencing purposes.
+
+```{r}
+#| label: tbl-missing-data
+
+kable(data_removed,
+    col.names = c("Filter Applied", "Dropped", "% of Sample"),
+    caption = paste("Data Summary (Original Sample Size: n =", n_step1, ")"),
+    booktabs = TRUE) |>
+  kable_styling(latex_options = "striped")
+```
+
+We determined that most NAs in columns and extreme outliers account for 5% and 2% of the data, respectively (@tbl-missing-data). We remove these safely from our dataset to ensure the model can be appropriately run without skew from outliers as well.
+
+We also evaluated the number of lending institutions within the dataset. To ensure stable group-level estimates in the random effects model, the sample was restricted to lenders processing at least 50 applications. We wanted to ensure that there were not too many banks included with an insignificant number of applications. We found that there are 214 lenders that consist of less than 50 applications, yet they compose only 2% of the dataset (@tbl-lenders in Appendix [-@sec-appendix-data]). We remove these lenders, which on average only had 10 applications, and remained with 157 lenders. While inference ignores micro-sized institutions, this seemed appropriate to observe systemic bias across the state.
+
+Overall, after analysing and removing the missing data, we retained a massive size of data, resulting in a total final data size of 70,398 loan applications.
+
+
+
+## Data Variables
+
+The cleaned dataset consists of 70,398 observations and 11 variables. The dataset includes the binary outcome variable (Loan Status), alongside applicant demographics, financial characteristics, and geographic variables used neighbourhood-level controls and hierarchical grouping. An overview of the variables used in the model is provided in @tbl-variables.
+
+```{r}
+#| label: tbl-variables
+#| echo: false
+#| tbl-cap: "Summary Description of Model Variables ($N = 70,398$)"
+
+# 1. Create the data frame
+var_data <- tibble::tribble(
+  ~Variable,       ~Role,           ~Description,
+  "Loan Status",   "Dependent",     "Binary outcome of the loan status (Approved = 0, Denied = 1).",
+  "Race",          "Predictor",     "Categorical variable with 5 racial classifications: White, Black, Asian, Other/Multiracial, Joint (for co-applicants).",
+  "Sex",           "Predictor",     "Applicant Sex: Male, Female, Joint (for co-applicants).",
+  "Age",           "Predictor",     "Age of the primary applicant, binned into 7 categories",
+  "Income",        "Control",       "Annual household income (Log-transformed)",
+  "DTI Ratio",     "Control",       "Debt-to-Income ratio, binned into 4 categories",
+  "LTV Ratio",     "Control",       "Loan-to-Value ratio",
+  "Minority %",    "Control",       "Tract's minority population percentage.",
+  "Tract-to-MSA Income Ratio","Control",       "Ratio of tract median income to metropolitan statistical area (MSA) median income.",
+  "Bank (LEI)",    "Random Effect", "Unique bank identifier for institution-level variance.",
+  "County",        "Random Effect", "Geographic division for regional variance."
+)
+
+var_data |>
+  kable(
+    format = "markdown", 
+    booktabs = TRUE, 
+    linesep = "",
+    col.names = c("Variable", "Role", "Description")
+  ) |>
+  kable_styling(
+    font_size = 9
+  ) |>
+  # Adding the category headers (Row Packing)
+  pack_rows("Outcome", 1, 1) |>
+  pack_rows("Demographics", 2, 4) |>
+  pack_rows("Financials", 5, 7) |>
+  pack_rows("Neighborhood", 8, 9) |>
+  pack_rows("Grouping", 10, 11) |>
+  # Ensuring the description column wraps in the PDF
+  column_spec(3, width = "25em")
+```
+
+### Outcome Variable
+
+The dependent variable, Loan Status, indicates whether a loan application was Denied (1) or Approved (0). Overall, our dataset includes a majority of approved applications, including 64,025 (90%) approvals and 6,373 (10%) denied applications. Though a majority of our applications are approvals, we seek to determine what factors influence denials.
+
+### Predictor Variables
+
+Demographics: Race, Sex, and a categorized Age are evaluated for potential demographic disparities in lending outcomes.
+
+Financials: Financial metrics serve as the primary controls for creditworthiness. To ensure model stability and interpretability, we applied specific transformations.
+
+- Debt-to-Income: The ratio was transformed from a mix of numeric values and bins into 4 consolidated bins. This was based on the accepted standards for debt-to-income ratio risk assessment, where below 36% is considered excellent, between 36% to 49% is considered average, and over 50% is considered high risk [@agsouth2022good]. We kept the data's original category split for >60\% due to severe denial risk spikes at this threshold.
+
+- Income: We applied a logarithmic transformation to the income variable to account for heavy right-skew due to high income individuals. Normalizing the distribution ensures extreme outliers do not disproportionately influence the model.
+
+- Note on Loan Amount: While apart of the dataset, we assessed the continuous predictors for multicollinearity. A high Pearson correlation (r = 0.76) was observed between the log-transformed income and loan amount variables. To prevent highly correlated predictors weakening coefficient interpretation, loan amount was dropped as a covariate from the final model.
+
+Geography & Hierarchy: To account for spatial biases such as redlining, we control for the applicant's neighbourhood data, including variables such as a tract's minority population percentage. To measure lending disparities across different counties and banks, we incorporate County $(n = 62)$ and Lender $(n = 157)$ of each applicant as group-level effects in our hierarchical model.
+
+## Data Summary and Visualization
+
+```{r}
+#| label: tbl-financials
+#| tbl-pos: "H"
+#| tbl-cap: "Summary of financial and neighborhood characteristics, separated by loan decision. The data reveals lower median incomes and higher tract minority percentages among denied applications."
+
+tbl_financials <- loans_NY |>
+  select(status, income, tract_minority_population_percent, combined_loan_to_value_ratio)
+
+tbl_financials |>
+  tbl_summary(
+    by = status,
+    digits = all_continuous() ~ 1,
+    label = list(
+      income ~ "Gross Income ($1000s)",
+      tract_minority_population_percent ~ "Tract's Minority Population Percent(%)",
+      combined_loan_to_value_ratio ~ "Loan-to-Value (%)")) |>
+modify_spanning_header(all_stat_cols() ~ "**Loan Decision**")
+```
+
+```{r}
+#| label: fig-race-sex
+#| fig-pos: "H"
+#| fig-cap: "Mortgage denial rates displayed by applicant sex and race. The visualization highlights distinct disparities across demographic groups, motivating their inclusion as key predictors."
+#| fig-width: 5
+#| fig-height: 3
+
+plot_race_sex <- loans_NY |>
+  group_by(race, sex) |>
+  summarise(denial_rate = mean(denied), n = n(), .groups = "drop") |>
+  # Filter for bins with enough data to be reliable
+  filter(n > 50) |>
+  ggplot(aes(x = reorder(sex, -denial_rate), y = denial_rate, fill = reorder(race, -denial_rate))) +
+  geom_col(position = "dodge", alpha = 0.8, color = "gray30") +
+  scale_fill_manual(values = c(
+    "White"            = "wheat1",       
+    "Asian"            = "wheat3",      
+    "Joint"            = "tan2",        
+    "Other/Multiracial"= "tan4",         
+    "Black"            = "sienna4")) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "top",
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 14)) +
+  labs(
+    title = "Denial Rates by Race and Sex", 
+    x = "Sex Category", 
+    y = "Denial Rate (%)",
+    fill = "Race")
+
+plot_race_sex
+```
+
+
+```{r}
+#| label: fig-geo-bank-dist
+#| fig-pos: "H"
+#| fig-cap: "Variation in mortgage denial rates at the county level (left) and individual lending institution level (right). The broad spread in baseline denial rates justifies the inclusion of these variables as random effects."
+#| fig-height: 3
+#| echo: false
+
+# Calculate denial rate per county
+plot_county <- loans_NY |>
+  group_by(county_code) |>
+  summarise(denial_rate = mean(denied), n = n()) |>
+  ggplot(aes(x = denial_rate)) +
+  geom_histogram(fill = "seagreen3", bins = 12) +
+  scale_x_continuous(labels = scales::percent) +
+  theme_minimal() +
+  labs(title = "Across NY Counties",
+    x = "County Denial Rate (%)", y = "Number of New York Counties") +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5, size = 12))
+
+plot_banks <- loans_NY |>
+  group_by(lender_id) |>
+  summarise(denial_rate = mean(denied), n = n()) |>
+  ggplot(aes(x = denial_rate)) +
+  geom_histogram(fill = "indianred3", bins = 10)+
+  scale_x_continuous(labels = scales::percent) +
+  theme_minimal() +
+  labs(title = "Across New York Banks",
+       x = "Bank Denial Rate (%)", y = "Number of banks") +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5, size = 12))
+
+(plot_county + plot_banks) + 
+  plot_annotation(
+    title = "Distribution of Mortgage Denial Rates",
+    theme = theme(
+      plot.title = element_text(face = "bold", hjust = 0.5, size = 14)))
+```
+
+\clearpage
+
+# Methods {#sec-methods}
+
+To determine demographic disparities and other significant factors of mortgage approvals, a Bayesian hierarchical logistic regression approach is employed for our inference goals.
+
+## Model Set-up
+
+\begin{align*}
+y_{i}| \pi_i &\sim \text{Bernoulli}(\pi_i) \\
+\mathrm{logit}(\pi_i) &= \beta_0 + \mathbf{Race}_i \boldsymbol{\beta}_{\text{Race}} + \mathbf{Sex}_i \boldsymbol{\beta}_{\text{Sex}} + \mathbf{Age}_i \boldsymbol{\beta}_{\text{Age}} \\ &+\mathbf{DebtToIncome}_i \boldsymbol{\beta}_{\text{DTI}} + \beta_{\text{Income}}\text{LogIncome}_{i} + \beta_{\text{LTV}}\text{LoanToValueRatio}_{i} \\ &+ \beta_{\text{Minority}}\text{TractMinorityPercent}_{i} + \beta_{\text{MSA}}\text{Tract-to-MSA IncomeRatio}_{i} \\
+&+ \alpha_{j[i]}^{\text{County}} + \alpha_{k[i]}^{\text{Bank}}
+\end{align*}
+\begin{align*}
+\beta_0, \boldsymbol{\beta} &\sim \mathcal{N}(0, 2.5) \quad \text{(weakly informative priors) }\\ \\
+\alpha_{j[i]}^{\text{County}} &= \eta_{j}^{\text{county}} \cdot \sigma_{\text{county}} \\
+\alpha_{k[i]}^{\text{Bank}}  &= \eta_{k}^{\text{bank}} \cdot \sigma_{\text{bank}} \\
+\eta_{j}^{\text{county}} &\sim \mathcal{N}(0, 1), \quad \text{for } j = 1, \dots, J \\
+\eta_{k}^{\text{bank}} &\sim \mathcal{N}(0, 1), \quad \text{for } k = 1, \dots, K \\
+\sigma_{\text{county}}, \sigma_{\text{bank}} &\sim \mathcal{N}^{+}(0, 1)
+\end{align*}
+
+- Units $i = 1, \dots, n$ denote a loan application
+
+- Outcome $y_i$ represents a loan outcome being Approved $(y_i=0)$ or Denied $(y_i=1)$
+
+- $\pi_i$ be the probability of a denial for loan application $i$
+
+- Groups $j = 1, \dots, J$ represent counties
+
+- Groups $k = 1, \dots, K$ represent financial lending institutions
+
+- Indexing $j[i]$ (the county of applicant $i$) and $k[i]$ (the bank of applicant $i$)
+
+- $\beta_0$ and $\boldsymbol{\beta}$ represent the global intercept term and the vector of all fixed-effect coefficients, respectively
+
+- $\sigma_{\text{county}}$ and $\sigma_{\text{bank}}$ represent the scale parameters for the hierarchical effects
+
+- $\eta_{j}^{\text{county}}$ and $\eta_{k}^{\text{bank}}$ are the standard normal parameters used in the non-centered parameterization
+
+**Categorical Predictors**
+
+- $\mathbf{Race}_i$: Vector of 4 indicators for Black, Asian, Other/Multiracial and Joint (Reference Level: White)
+- $\mathbf{Sex}_i$: Vector of 2 indicators for Female and Joint (Reference Level: Male)
+- $\mathbf{Age}_i$: Vector of 6 indicators for brackets 25-34, 35-44, 45-54, 55-64, 65-74, \> 74 (Reference Level: \<25)
+- $\mathbf{DebtToIncome}_i$: Vector of 3 indicators for brackets 36%-49%, 50%-60%, and \>60% (Reference Level: \<36%)
+
+**Continuous Predictors**
+
+- $\text{LogIncome}$
+
+- $\text{LoanToValueRatio}$
+
+- $\text{TractMinorityPercent}$
+
+- $\text{Tract-to-MSA IncomeRatio}$
+
+  These terms represent single, continuous control variables. We center and scale the continuous predictors to 1 standard deviation to ensure the convergence of Bayesian modelling and to make the intercept easier to interpret.
+
+**Group Level Effects**
+
+- $\alpha_{j[i]}^{\text{County}}$ represents the varying intercept for the applicant's county.
+- $\alpha_{k[i]}^{\text{Bank}}$ represents the varying intercept for the applicant's bank.
+
+We run the model in R [@citeR] using the `rstan` package of @citeRstan. We explicitly defined our hierarchical structure and prior distributions in a `.stan` file.
+
+## Model Considerations
+
+For the study, our central outcome of interest is loan origination. Since the categories (Approved and Denied) are encoded as a binary categorical variable, logistic regression is a natural choice for this analysis.
+
+The power of Bayesian hierarchical modelling lies in its ability to estimate group-level estimates. By adding two hierarchies, we account for inherent differences among banks and counties through group-level parameters. Rather than estimating these parameters independently, a non-nested double hierarchy assumes a common distribution per group. The group-level effects (random intercepts) are assumed to be drawn from a normal distribution with a mean of zero and a variance $\sigma^2$ to be estimated. We evaluate the magnitude of these group-level variances to determine the extent of the disparities within both groups. The approach also allows for estimation of variation within and between groups, helping to identify both individual loan-level patterns and broader bank and county differences. Existing literature commonly use hierarchical models to estimate geographic influences across the U.S.A [@oneil2025racialethnic; @moubadder2024increasing], noting how this approach has become standard for estimating regional effects like neighbourhood characteristics.
+
+We also utilize partial pooling within this model. This technique improves estimation accuracy by balancing independent group estimates with a global average, sharing information across groups. It ensures that for groups with particularly small sample sizes, their effect is partially shrunk towards the global average of that group. In our case, this becomes incredibly effective when there are financial lenders that process 50 applications compared to a major bank processing 5000 applications. Our model results are more robust to small sample sizes and provides better uncertainty estimates.
+
+## Model Performance
+
+We first fit a frequentist mixed-effects logistic regression model using the `lme4` package in R [@citelme4]. It verifies the data structure and would advise of any convergence issues before we run the computationally longer Bayesian model. We also use the frequentist model to detect potential mutlicollinearity (using Variance Inflation Factors) between our continuous predictors. See @tbl-glm-fixed, @tbl-glm-random and @fig-collin-check in Appendix [-@sec-glm-model] for further details.
+
+The Bayesian hierarchical logistic regression model uses weakly informative priors designed to provide structure to the posterior while still allowing the data to speak for itself. We fit a non-centered parameterization of the model's group-level parameters, by fitting a latent Gaussian variable and then recovering the parameters through scaling. The non-centered parameterization improves model convergence, explores the parameter space more efficiently, and reduces the dependence between sampled parameters.
+
+To validate the model, we analyze trace plots, effective sample sizes and $\hat{R}$ values to ensure convergence. Once the model is successfully fit, we conduct a series of posterior predictive checks using the simulated data. We evaluate the mean denial rates and group-level statistics for categorical variables such as race. Finally, we assess the underlying assumptions of a logistic regression model using the Receiver Operating Characteristic (ROC) curve, the Area under the curve (AUC) and binned residual plots to assess linearity assumptions. See Appendix [-@sec-model-details] for extensive plots and further details.
+
+\clearpage
+
+# Results {#sec-results}
+
+Our results are summarized in @tbl-bayes-model. Using our Hierarchical Bayesian Logistic Regression model, our regression analysis produced a posterior probability distribution for the model parameters.
+
+@tbl-bayes-model presents the posterior means, Odds Ratios (OR), and 95% Credible Intervals (CI) for the Bayesian hierarchical model. @fig-bayes-model presents coefficient plots to visualize the posterior mean effect size of the predictor variables on mortgage approval, while the lines indicate the 95% CI.
+
+```{r}
+#| label: load-models
+#| include: false
+
+# Load pre-processed data
+model_data <- readRDS(here("data", "02-analysis_data", "model_data.rds"))
+
+# Load models
+bayes_model <- readRDS(here("models", "01-hierarchical-models", "final_bayes_model.rds"))
+glmer_model <- readRDS(here("models", "01-hierarchical-models", "final_glmer_model.rds"))
+```
+
+```{r}
+#| label: tbl-bayes-model
+#| tbl-cap: "Bayesian Hierarchical Logistic Regression: Posterior Estimates for Fixed Effects"
+
+tidy_bayes <- tidy(bayes_model, conf.int = TRUE, conf.level = 0.95) |>
+  filter(grepl("^alpha|^beta", term))
+
+# List of variables to rename beta[1], beta[2], etc.
+var_names <- c(
+  "alpha" = "Global Intercept",
+  "beta[1]" = "Black",
+  "beta[2]" = "Asian",
+  "beta[3]" = "Joint (Race)",
+  "beta[4]" = "Other/Multiracial",
+  "beta[5]" = "Female",
+  "beta[6]" = "Joint (Sex)",
+  "beta[7]" = "Age: 25-34",
+  "beta[8]" = "Age: 35-44",
+  "beta[9]" = "Age: 45-54",
+  "beta[10]" = "Age: 55-64",
+  "beta[11]" = "Age: 65-74",
+  "beta[12]" = "Age: >74",
+  "beta[13]" = "DTI: 36%-49%",
+  "beta[14]" = "DTI: 50%-60%",
+  "beta[15]" = "DTI: >60%",
+  "beta[16]" = "Log Income",
+  "beta[17]" = "Loan-to-Value Ratio",
+  "beta[18]" = "Tract Minority %",
+  "beta[19]" = "Tract-to-MSA Income %"
+)
+
+tidy_bayes |> 
+  mutate(
+    term = var_names[term],
+    OR = exp(estimate), # Calculate the Odds Ratio
+    cred_int = paste0("[", round(conf.low, 2), ", ", round(conf.high, 2), "]")) |>
+  select(
+    Predictor = term, 
+    `Posterior Mean` = estimate, 
+    `Odds Ratio` = OR,               # Add it to the final table
+    `Post. SD` = std.error, 
+    `95% Credible Interval` = cred_int) |>
+  kable(digits = 2, booktabs = TRUE) |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) |>
+  pack_rows("Race (Baseline: White)", 2, 5) |>
+  pack_rows("Sex (Baseline: Male)", 6, 7) |>
+  pack_rows("Age Groups (Baseline: <25)", 8, 13) |>
+  pack_rows("Debt-to-Income (Baseline <36%)", 14, 16) |>
+  pack_rows("Continuous Predictors", 17, 20)
+```
+
+```{r}
+#| label: fig-bayes-model
+#| fig-height: 9
+#| fig-width: 8
+
+# Variable Groupings
+demo_vars <- c("Black", "Asian", "Joint (Race)", "Other/Multiracial", "Female", "Joint (Sex)", 
+               "Age: 25-34", "Age: 35-44", "Age: 45-54", "Age: 55-64", "Age: 65-74", "Age: >74")
+dti_vars      <- c("DTI: 36%-49%", "DTI: 50%-60%", "DTI: >60%")
+context_vars  <- c("Log Income", "Loan-to-Value Ratio", "Tract Minority %", "Tract-to-MSA Income %")
+
+# Plotting Function
+plot_forest <- function(vars, subtitle) {
+  tidy_bayes |>
+    filter(var_names[term] %in% vars) |>
+    mutate(Predictor = factor(var_names[term], levels = rev(vars))) |>
+    ggplot(aes(x = estimate, y = Predictor)) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+    geom_pointrange(aes(xmin = conf.low, xmax = conf.high), color = "navyblue") +
+    labs(subtitle = subtitle, x = NULL, y = NULL) +
+    theme_minimal() +
+    theme(plot.subtitle = element_text(face = "bold", size = 11))
+}
+
+p1 <- plot_forest(demo_vars, "Demographic Factors (Race & Sex)")
+p2 <- plot_forest(dti_vars,      "Debt-to-Income (DTI)")
+p3 <- plot_forest(context_vars,  "Financial & Geographic Context")
+
+# Vertical Stack
+(p1 / p2 / p3) + 
+  plot_layout(heights = c(6, 3, 4)) +
+  plot_annotation(
+    title = "Posterior Estimates for Mortgage Denial",
+    theme = theme(plot.title = element_text(face = "bold", size = 16)))
+```
+
+## Model Estimates
+
+### Financial Factors
+
+The model identifies several predictors that significantly contribute to the risk of a mortgage denial. The Debt-to-Income (DTI) ratio is shown to be an important driver of loan denial. While moderate DTI levels (36%-49%) show no credible difference from the \<36% baseline (CI includes zero), the risk drastically changes once the debt burden increases. Applicants with a DTI ratio of 50%-60% face nearly 14 times the odds of denial (OR 13.98), and 220 times the odds of denial for those exceeding 60% DTI. This aligns with standard lending practices, where ratios over 50% are considered high risk applicants [@agsouth2022good]. Other standard financial metrics are similarly consistent with lending principles. Higher Log Income slightly reduces denial odds (OR 0.79), while higher Loan-to-Value (LTV) ratios increase your odds of denial (OR 1.16).
+
+### Demographic Factors
+
+After controlling for individual financial risk and geographic context, significant disparities persist across demographic groups of loan applicants, particularly Race. Compared to the baseline level of White applicants, Black applicants experience a 1.57 times the odds of denial (95% CI \[0.34, 0.57\] on the log-odds scale). Asian applicants also show a smaller but credible increase in denial odds (OR 1.15). Other/Multiracial applicants face a severe penalty, with approximately double the odds of denial (OR 2.03). Although Other/Multiracial applicants were a smaller fraction of the data, Bayesian shrinkage still provides us a trustworthy credible interval for the coefficient (log-odds CI \[0.39, 1\], which definitively exclude 0).
+
+The ridgeline plot in @fig-race-effects visualizes the posterior predicted probabilities of loan denial for each racial group, making it more interpretable for wider audiences. The density ridges show the full range of uncertainty for these estimates, while the black dots and horizontal lines mark the posterior medians and credible intervals. This visualization highlights a disparity in denial risk, showing that the distributions for Other/Multiracial and Black applicants are centered at higher probabilities than the White and Joint categories.
+
+```{r}
+#| label: fig-race-effects
+#| fig-height: 4
+#| fig-width: 5
+#| fig-pos: "H"
+#| fig-cap: "Posterior Predicted Probability of Mortgage Denial by Race. The baseline probability represents a reference applicant (White, Male, Age <25, DTI <36%) where all continuous predictors are held at their mean values."
+
+race_deviations <- bayes_model |>
+  spread_draws(alpha, beta[k]) |>
+  filter(k <= 4) |>
+  ungroup() |> 
+  mutate(
+    Race = case_when(
+      k == 1 ~ "Black",
+      k == 2 ~ "Asian",
+      k == 3 ~ "Joint",
+      k == 4 ~ "Other"),
+    log_odds = alpha + beta)
+
+white_baseline <- bayes_model |>
+  spread_draws(alpha) |>
+  ungroup() |> 
+  mutate(
+    Race = "White",
+    log_odds = alpha)
+
+plot_data <- bind_rows(race_deviations, white_baseline) |>
+  mutate(
+    prob = plogis(log_odds),
+    Race = fct_reorder(Race, prob, .fun = median))
+
+ggplot(plot_data, aes(y = Race, x = prob)) +
+  stat_halfeye(fill = "midnightblue", alpha = 0.8) +
+  scale_x_continuous(labels = scales::percent, limits = c(0, NA)) +
+  labs(
+    title = "Predicted Probability of Denial by Race",
+    subtitle = "Posterior distributions based on Bayesian Model baseline estimates",
+    x = "Probability of Denial",
+    y = "Race"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+Among varying sexes, compared to male-only applicants, female primary applicants are marginally less likely to be denied. Notably, joint applications face the lowest odds of denial. This likely reflects the stronger profile they have due to a combined financial history between joint applicants, which would be beneficial for lenders' consideration.
+
+Age also seems to function as a predictor in mortgage approval. Compared to applicants under 25, all older cohorts experience lower log-odds of denial, with the 25-34 group showing the strongest reduction in risk (OR 0.66). The risk of denial does seem to increase with age, with an exception for ages 65−74 in this model. The credible intervals are less significant for the middle aged group and quite wide for the oldest applicants, but a trend seems to persist with age. Age is complex as it can act as a proxy for a longer, more stable credit record, yet comes with several fluctuations as well.
+
+### Neighbourhood Context
+
+At the neighbourhood level, census tract statistics provides additional explanatory power. An increase in the Tract-to-MSA Income % credibly reduces the odds of denial (OR 0.92). This corresponds with applicants in wealthier neighborhood are likely more financial stable. However, the Tract Minority % variable does not show a strictly credible effect on denial odds (95% CI \[-0.01, 0.08\]). This suggests that individual-level demographic traits may significantly impact denial differences than the neighbourhood composition itself.
+
+## Model Hierarchical Component
+
+The hierarchical components of the model capture the differences between counties and lending institutions across New York. @tbl-bayes-hier presents the variance, standard deviation, and 95% credible intervals derived from the posterior probability distributions.
+
+```{r}
+#| label: tbl-bayes-hier
+#| tbl-cap: "Bayesian Hierarchical Model: Group-Level Variance and Extreme Deviations with 95% Credible Interval"
+
+tidy_sigmas <- tidy(bayes_model, conf.int = TRUE, conf.level = 0.95) |>
+  filter(grepl("^sigma", term)) |>
+  mutate(
+    Variance = estimate^2, # Calculate Variance by squaring the SD
+    Parameter = case_when(
+      term == "sigma_county" ~ "County-Level Variation",
+      term == "sigma_bank"   ~ "Lender-Level Variation"
+    ),
+    cred_int = paste0("[", round(conf.low, 2), ", ", round(conf.high, 2), "]")
+  ) |>
+  select(
+    Parameter, 
+    Variance, 
+    `Std. Deviation` = estimate, 
+    `95% SD CI` = cred_int
+  )
+
+tidy_sigmas |>
+  kable(digits = 3, booktabs = TRUE) |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+Lender-level variation is the larger grouping effect, with a substantially higher variance (1.443) than county-level variation (0.161). @fig-shrinkage illustrates the benefit of the model's partial-pooling. Lenders with a low application volumes are shrunk toward the global average, prevening noise from skewing results.
+
+Geographic variation is smaller but remains credibly above zero (95% SD CI: \[0.32, 0.51\]), indicating notable differences in how mortgage applications are assessed across the state. @fig-ny-map maps the counties deviating most from the state denial average. This map reveals a distinct spatial effect with regional differences that is captured by the hierarchical model. The dark red clusters, representing higher baseline denial rates, are heavily concentrated in and around the New York City metropolitan area. In contrast, the darker blue regions suggest they are less stringent in their baseline loan decisions across upstate and western New York.
+
+```{r}
+#| label: fig-shrinkage
+#| fig-cap: "Bayesian Lender-Level Deviations and Shrinkage by Application Volume"
+#| out-width: 75%
+
+bank_counts <- model_data |>
+  group_by(lender_id) |>
+  summarize(n_apps = n()) |>
+  mutate(term = paste0("eta_bank[", as.numeric(as.factor(lender_id)), "]"))
+
+funnel_data <- tidy(bayes_model, conf.int = TRUE, conf.level = 0.95) |>
+  filter(grepl("^eta_bank", term)) |>
+  left_join(bank_counts, by = "term")
+
+ggplot(funnel_data, aes(x = n_apps, y = estimate)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_pointrange(
+    aes(ymin = conf.low, ymax = conf.high),
+    color = "midnightblue", alpha = 0.4, size = 0.3) +
+  scale_x_log10(labels = scales::comma) +
+  labs(
+    title = "Posterior Estimates of Lender-Level Effects on Denials",
+    subtitle = "Comparison of Lenders from global average (indicated by y = 0)",
+    x = "Number of Applications Processed (Log Scale)",
+    y = "Deviation from Global Average (Log-Odds)") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+```{r}
+#| label: fig-ny-map
+#| fig-cap: "Geographic Variation in Mortgage Denial Baselines across New York Counties"
+#| message: false
+#| warning: false
+
+options(tigris_use_cache = TRUE)
+
+# Match FIPS codes to Stan model indexing
+stan_fips_order <- levels(as.factor(model_data$county_code))
+
+# Extract estimates and join GEOID
+county_estimates <- tidy(bayes_model, conf.int = TRUE, conf.level = 0.95) |>
+  filter(grepl("^eta_county", term)) |>
+  mutate(GEOID = stan_fips_order[row_number()])
+
+# Download shapefile and merge with estimates
+ny_map_data <- counties(state = "NY", cb = TRUE, class = "sf") |>
+  left_join(county_estimates, by = "GEOID")
+
+# Plot spatial distribution
+ggplot(data = ny_map_data) +
+  geom_sf(aes(fill = estimate), color = "white", size = 0.2) +
+  scale_fill_gradient2(
+    low = "midnightblue",
+    mid = "white",
+    high = "firebrick3",
+    midpoint = 0,
+    name = "Log-Odds\nDeviation"
+  ) +
+  labs(
+    title = "Geographic Disparities in NY Mortgage Denials",
+    subtitle = "Posterior Means of County-Level Group Effects, White indicating state-average") +
+  theme_void() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "right"
+  )
+```
+
+\clearpage
+
+# Discussion {#sec-discussion}
+
+In this study, we examined the drivers of mortgage denial across the state of New York. By employing a hierarchical Bayesian logistic regression model, we accounted for applicant demographics, financial profiles and neighbourhood-level characteristics, while investigating how risks change within and between both counties and banks.
+
+## Demographic Disparities {#sec-first-point}
+
+Our findings revealed significant racial disparities, with people of colour facing higher denial rates than White applicants. Our model accounted for several traditional lending factors that aligned consistently with standard lending principles. Higher income, lower debt burdens, early adulthood age and applying jointly all reasonably decreased denial risk. However, after controlling for these applicant characteristics, we still observe a disparity among various racial groups. Aligned with existing research, this shows how disparities persist even after incorporating relevant control variables [@martinez2021reveal; @oneil2025racialethnic].
+
+Although race and ethnicity are not explicitly considered in modern application processes, these disparities suggests indirect factors impacting minorities. Factors like crime rates, single-parent households, and foreclosure rates within an applicant's region can all be discriminatory against an applicant. Furthermore, the standard algorithms have become widely outdated for mortgage applications. They are considered to reward traditional credit metrics that White Americans have historically had more opportunity to build [@bhutta2025racial]. Unfortunately, persons of colour have faced unjust disadvantages in building traditional credit worthiness, due to historic lack of investment, lack of generational wealth, and property devaluation [@namin2022persistence]. Even if credit models were built to be race-blind and treated everyone equally, persistent longstanding biases already disadvantage the standard minority applicant.
+
+## Consequences of Institutional and Geographic Variance {#sec-second-point}
+
+Our study evaluates disparities through a hierarchical structure, isolating specific effects of lenders and counties.
+
+Bank-level variation was found to be the more significant grouping effect in our model. While banks are bound to fair fair lending laws, such as the Equal Credit Opportunity Act and the Fair Housing Act, bias at the institutional level can often go undetected. Research indicates that even highly rated banks demonstrate statistical discrimination across all loan sizes [@cyree2023investigating]. In other studies, institutions have faced litigation for discriminatory practices, only decreasing their denial rates following legal action. Our results validate these institutional differences across New York banks, and helps to understand where reform efforts might be effectively focused to target discrimination.
+
+At the geographic level, our model identified a small, credible gap in lending outcomes across several New York counties. Area level discrimination has been studied across U.S. metropolitan area, with work by @moubadder2024increasing utilizing spatial models at the granular census tract level. Geographic disadvantages have long existed due to old, discriminatory policies in government credit lending, known as redlining. During the 1930s, when race was legally used as a proxy for credit risk, neighbourhoods with high percentages of non-white residents were explicitly mapped and marginalized [@martinez2021reveal]. While it is illegal now, this practice has left a long-term effect on credit access to underserved communities. One study, @beyer2021mortgage, even showed that women residing in heavily redlined areas experienced worse survival in breast cancer–specific mortality, after controlling for disease and demographic factors. Our results explore how spatial bias seems to still exist today, and marginalized communities are the ones often most impacted.
+
+## Limitations and Future Extensions
+
+While our model considered several pertinent factors in loan applications, particularly financial characteristics, the model does face key data limitations. Credit score data are not publicly available, yet often considered a significant component of a mortgage approval [@namin2022persistence]. Future studies involving privatized credit data could reveal more precise insights. Additionally, the data contained a notable amount of missing information regarding applicant race. If this data is not missing at random, there is potential bias if this subset differs systematically from the rest of the sample. Furthermore, our analysis did not isolate the racial profiles of joint applicants, who performed relatively well in loan denial risk.
+
+The potential for this research extends far beyond these variables and timespan chosen for analysis. @lewis-faupel2024racial remarks how these variables can be explored through interaction effects, seeing how racial biases change as a function of an applicant's debt burden. The HMDA platform also provides comprehensive historical data, and research has been conducted to determine the persistence of lending bias through time [@natarajan2025persistent]. Temporal analysis can reveal how bias has evolved and whether equitable policies have positively affected current gaps.
+
+\newpage
+
+\appendix
+
+# Appendix {.unnumbered}
+
+# Additional Data Summaries {#sec-appendix-data}
+
+```{r}
+#| label: tbl-columns-missing
+#| tbl-cap: "Summary of missing data, withheld values, and outliers across key variables in the initial standard mortgage sample $(n = 93,100)$"
+
+kable(missing_data, 
+      col.names = c("Variable", "Issue", "Count", "% of Total")) |>
+  kable_styling(latex_options = "striped")
+```
+
+
+```{r}
+#| label: tbl-summary-missing-race
+#| tbl-cap: "Average denial rates and other characteristics of mortgage applicants who disclosed their race versus those with missing racial data. Approximately 14.6% of the base population omitted racial demographic data. An analysis of this cohort reveals that the data is not Missing Completely at Random (MCAR). Instead, these applicants demonstrate a difference financial profile, having higher mean incomes ($225k vs. $185k) and higher average loan amounts ($519k vs. $427k) compared to applicants who disclosed their race."
+
+kable(missing_race_summary,
+    col.names = c("Race Status", "N", "% of Base", "Mean Income ($)", "Mean Loan ($)", 
+                  "Denial Rate", "% Missing Income"),
+    format.args = list(big.mark = ","),
+    booktabs = TRUE) |>
+  kable_styling(latex_options = c("striped", "hold_position")) |>
+  column_spec(4:7, width = "2cm")
+```
+\clearpage
+
+```{r}
+#| label: tbl-missing-race-sex
+#| tbl-cap: "Data loss resulting from the exclusion of applicants with missing racial and sex demographics"
+
+kable(demographic_loss_table, 
+      col.names = c("Filter Applied", "Records Dropped", "% of Total")) |> 
+  kable_styling(latex_options = c("striped"))
+```
+
+
+```{r}
+#| label: tbl-lenders
+#| tbl-cap: "Summary statistics of lender application volumes, comparing retained lenders against those dropped due to low total application counts ($n < 50$)."
+
+kable(lender_summary, 
+      col.names = c("Status", "Total Lenders", "Total Apps", 
+                    "Median Apps", "Mean Apps", "Max Apps"),
+      format.args = list(big.mark = ",")) |>
+  kable_styling(latex_options = c("striped", "hold_position"))
+```
+
+# Frequentist Model Validation {#sec-glm-model}
+
+Using a linear mixed modelling approach, our regression analysis produced estimates of the predictors’ effects on the dependent variable, the loan denial outcome. The model did not run into any issues in execution, confirming our Bayesian model should run efficiently. The model presents no notable multicollinearity (@fig-collin-check).
+
+
+## Multicollinearity Check
+
+```{r}
+#| label: fig-collin-check
+#| fig-height: 3
+#| fig-width: 7
+#| out-width: "75%"
+#| fig-pos: "H"
+#| fig-cap: "VIF scores for model covariates. All values < 2.5, confirming minimal multicollinearity."
+#| message: false
+
+collin_check <- check_collinearity(glmer_model)
+
+# Ensure none of our scaled predictors are highly correlated with each other.
+# Visual of VIF scores
+plot(collin_check) + 
+  labs(title = "Multicollinearity Assessment: VIF Scores", subtitle = NULL, y = "VIF (log-scaled)") +
+  scale_x_discrete(labels = c(
+    "race" = "Race",
+    "sex"= "Sex",
+    "age" = "Age",
+    "dti" = "Debt-to-Income",
+    "log_income_z" = "Log Income",
+    "ltv_z" = "Loan-to-Value",
+    "minority_pct_z" = "Minority %",
+    "msa_income_pct_z" = "MSA Income %")) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5, margin = margin(b = 10)),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+    legend.position = "top")
+
+```
+
+\clearpage
+
+\clearpage
+
+## Linear Mixed Effects Model
+
+```{r}
+#| label: tbl-glm-fixed
+#| tbl-cap: "Generalized Linear Modelling: Fixed Effects for Mortgage Denials"
+
+tidy_results <- tidy(glmer_model, effects = "fixed", conf.int = FALSE)
+
+tidy_results |>
+  select(term, estimate, std.error, p.value) |>
+  mutate(
+    # Clean up the term names for a professional look
+    term = str_replace(term, "\\(Intercept\\)", "Intercept"),
+    term = str_replace_all(term, c("race" = "Race: ", "sex" = "Sex: ", "age" = "Age: ", "dti" = "Debt-to-Income Ratio: ")),
+    term = str_replace(term, "log_income_z", "Log Income"),
+    term = str_replace(term, "ltv_z", "Loan-to-Value Ratio"),
+    term = str_replace(term, "minority_pct_z", "Tract Minority %"),
+    term = str_replace(term, "msa_income_pct_z", "Tract to MSA Income %"),
+    p.value = scales::pvalue(p.value)
+  ) |>
+  select(Predictor = term, Estimate = estimate, `Std. Error` = std.error, `p-value` = p.value) |>
+  kable(digits = 2, booktabs = TRUE) |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = F) |>
+  # Highlight significant results
+  column_spec(4, bold = ifelse(tidy_results$p.value < 0.05, TRUE, FALSE))
+```
+
+```{r}
+#| label: tbl-glm-random
+#| tbl-cap: "Variance Components of Random Effects"
+
+# Extract the random effect parameters from the model
+ranef_summary <- tidy(glmer_model, effects = "ran_pars")
+
+ranef_summary |>
+  mutate(Variance = estimate^2) |>
+  mutate(
+    Group = case_when(
+      group == "lender_id" ~ "Lender",
+      group == "county_code" ~ "County",
+      TRUE ~ group),
+    Parameter = "Baseline Shift (Intercept)") |>
+  select(Group, Parameter, Variance, `Std. Deviation` = estimate) |>
+  kable(digits = 3, booktabs = TRUE) |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+@tbl-glm-fixed reports the coefficient estimates, their corresponding standard errors and p-values, which evaluate the significance of each predictor’s effect in the model. @tbl-glm-random reports the variance components of the random effects. The fixed-effect estimates from the GLMM were found to be highly stable, with coefficients for key predictors like Race: Black (0.45) and DTI \>60% (5.22) closely matching the Bayesian posterior means. This consistency validates the choice of priors. The model also presents no notable multicollinearity (@fig-collin-check).
+
+# Bayesian Model Diagnostics {#sec-model-details}
+
+```{r}
+#| label: load-sim-data
+#| include: false
+#| warning: false
+
+library(rstan)
+library(pROC)
+library(arm)
+
+y_rep <- readRDS(here("models", "01-hierarchical-models", "y_rep_simulations.rds"))
+y_obs <- model_data$denied
+p_hat <- colMeans(y_rep)
+```
+
+## MCMC Diagnostics
+
+The Bayesian hierarchical model demonstrated computational stability and successful convergence across all parameters. In @fig-trace, the randomness in our trace plots shows the stability of each individual chain for our parameters. Our density plots of chains show consistency across the four chains, producing nearly indistinguishable posterior approximations (@fig-chain-dens).
+
+All fixed and random effect estimates achieved $\hat{R}$ values of nearly 1 (@fig-rhat-eff), indicating that the MCMC chains mixed thoroughly and reached a stable posterior distribution. Furthermore, Effective Sample Sizes (ESS) were sufficiently large (all at least greater than 100) for reliable inference (Figure @fig-rhat-eff).
+
+### $\hat{R}$ Values and Effective Size
+
+```{r}
+#| label: fig-rhat-eff
+#| fig-cap: "(Left) Distribution of R-hat values for all 461 parameters. (Right) Distribution of Effective Sample Sizes."
+#| fig-width: 8
+#| fig-height: 4
+#| message: false
+
+# R-hat plot
+rhats <- rhat(bayes_model)
+p_rhat <- mcmc_rhat_hist(rhats) +
+  theme_minimal() +
+  labs(
+    title = "R-hat Values",
+    x = "R-hat",
+    y = "Frequency") +
+  theme(plot.title = element_text(face = "bold", size = 12), 
+        legend.position = "bottom")
+
+# Effective Sample Size plot
+n_eff <- data.frame(n_eff = summary(bayes_model)$summary[, "n_eff"])
+
+p_eff <- ggplot(n_eff, aes(x = n_eff)) +
+  geom_histogram(fill = "#d1e1ec", alpha = 0.9, bins = 40) +
+  geom_vline(xintercept = 100, linetype = "dashed", color = "darkgray", linewidth = 1) +
+  labs(
+    title = "Effective Sample Sizes",
+    x = "Effective Sample Size",
+    y = "Number of Parameters") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 12))
+
+p_rhat + p_eff
+```
+
+\clearpage
+
+### Trace Plots
+
+```{r}
+#| label: fig-trace
+#| fig-height: 9
+#| fig-width: 10
+#| fig-cap: "MCMC Trace Plots for Parameters"
+
+var_names <- c(
+  "alpha" = "Global Intercept",
+  "beta[1]" = "Black", "beta[2]" = "Asian", "beta[3]" = "Joint (Race)", 
+  "beta[4]" = "Other/Multiracial", "beta[5]" = "Female", "beta[6]" = "Joint (Sex)",
+  "beta[7]" = "Age: 25-34", "beta[8]" = "Age: 35-44", "beta[9]" = "Age: 45-54",
+  "beta[10]" = "Age: 55-64", "beta[11]" = "Age: 65-74", "beta[12]" = "Age: >74",
+  "beta[13]" = "DTI: 36%-49%", "beta[14]" = "DTI: 50%-60%", "beta[15]" = "DTI: >60%",
+  "beta[16]" = "Log Income", "beta[17]" = "Loan-to-Value \n Ratio",
+  "beta[18]" = "Tract Minority %", "beta[19]" = "Tract-to-MSA \n Income %",
+  "sigma_county" = "County-Level Std. Dev.",
+  "sigma_bank"   = "Lender-Level Std. Dev."
+)
+
+# Convert Stan object to an array for bayesplot
+posterior_array <- as.array(bayes_model)
+
+mcmc_trace(posterior_array, pars = names(var_names), 
+           facet_args = list(ncol = 4, labeller = as_labeller(var_names))) +
+  theme_minimal()
+```
+
+\clearpage
+
+### Chain Density Plots
+
+```{r}
+#| label: fig-chain-dens
+#| fig-height: 10
+#| fig-width: 10
+#| out-width: "95%"
+#| fig-cap: "MCMC Density Plots for Parameters"
+
+mcmc_dens_overlay(bayes_model, pars = names(var_names), 
+                   facet_args = list(ncol = 4, labeller = as_labeller(var_names)))
+```
+
+\clearpage
+
+## Posterior Predictive Checks
+
+The performance of the model was validated through Posterior Predictive Checks (PPC). We compare the mortgage denial rates from 4000 simulated replicated datasets from the posterior distribution with the observed data. For the observed state-level average denial rate of New York, the PPC is consistent with sampled predicted from the Bayesian model (@fig-ppc-combined (a)).
+
+To confirm how the model is performing across specific racial groups, we plot multiple PPCs for their denial rates (@fig-ppc-combined (b)). This plot also demonstrates that the model effectively captures the inherent differences in baseline denial averages, with all distributions centered around the observed value.
+
+
+```{r}
+#| label: fig-ppc-combined
+#| fig-cap: "Posterior Predictive Checks for Mean Denial Rate."
+#| fig-subcap: 
+#|   - "Overall Denial Rate"
+#|   - "Denial Rate by Race"
+#| layout-ncol: 2
+#| fig-height: 6
+#| fig-width: 5
+#| message: false
+
+y_obs <- model_data$denied
+y_obs_means <- tapply(y_obs, model_data$race, mean)
+y_rep_means <- sapply(names(y_obs_means), function(r) rowMeans(y_rep[, model_data$race == r]))
+
+# PLOT A: Overall Denial Rate
+ppc_stat(y = y_obs, yrep = y_rep, stat = "mean") +
+  labs(
+    title = "Overall Denial Rate",
+    x = "Mean Denial Rate") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 20), legend.position = "bottom")
+
+# PLOT B: Grouped by Race
+ppc_stat_grouped(
+  y = y_obs_means, 
+  yrep = y_rep_means, 
+  group = names(y_obs_means), 
+  stat = "mean",
+  facet_args = list(ncol = 2)) +
+  scale_color_manual(values = "firebrick") +
+  labs(
+    title = "Denial Rate by Race",
+    x = "Mean Denial Rate") +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom", 
+    axis.text.x = element_text(angle = 45, hjust = 1), 
+    plot.title = element_text(face = "bold", size = 20))
+```
+
+
+
+
+\clearpage
+
+## Logistic Regression Diagnostics
+
+```{r}
+#| label: fig-logistic-diagnostics
+#| fig-cap: "Logistic Regression Diagnostics."
+#| fig-subcap: 
+#|   - "ROC curve for mortgage denial prediction."
+#|   - "Binned residual plot assessing modelling assumptions."
+#| layout-ncol: 2
+#| fig-width: 5
+#| fig-height: 5
+#| message: false
+
+# Calculate predictions and evaluate data
+p_hat <- colMeans(y_rep)
+eval_data <- data.frame(truth = y_obs, pred_prob = p_hat)
+residuals <- y_obs - p_hat
+
+# PLOT ROC curve
+roc_obj <- roc(response = eval_data$truth, predictor = eval_data$pred_prob)
+auc_value <- round(auc(roc_obj), 3)
+
+ggroc(roc_obj, colour = "midnightblue", linewidth = 1.2) +
+  annotate("segment", x = 1, xend = 0, y = 0, yend = 1, linetype = "dashed") +
+  labs(
+    title = "ROC Curve",
+    subtitle = paste("AUC =", auc_value),
+    x = "Specificity",
+    y = "Sensitivity") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold"))
+
+# PLOT Binned Residual Plot
+binnedplot(
+  x = p_hat, 
+  y = residuals, 
+  main = "Binned Residual Plot",
+  xlab = "Expected Probability of Denial",
+  ylab = "Average Residual")
+```
+
+The performance of the logistic regression model is assessed using measures of model fit, such as residual deviance and the Receiver Operating Characteristic (ROC) Curve.
+
+The ROC curve plots the false positive rate against the true probability for a range of threshold probabilities from 0 to 1 (@fig-logistic-diagnostics (a)). Our area under the curve (AUC) of 0.85 suggests this model has a strong prediction accuracy. While we are not concerned with looking at prediction, we observe that this model is doing well in explaining the outcomes.
+
+For our residual analysis, traditional residual plots are ineffective for discrete data. As described by @gelman2007data, we plot binned residuals plots using the `arm` package [@citearm], displaying the average residuals versus the average fitted value for each data bin. This model looks reasonable, as the majority of fitted values in @fig-logistic-diagnostics (b) seem to fall within the $\pm$ 2 SE bands represented by the grey lines.
+
+\clearpage
+
+\newpage
+
+# References {.unnumbered}
+
+::: {#refs}
+:::
+
